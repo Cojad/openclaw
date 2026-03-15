@@ -1,0 +1,62 @@
+# Dockerfile.cojad — 基於 upstream 映像的個人自訂層
+# 用法：先用原始 Dockerfile 建 upstream 映像，再用此檔案疊加自訂
+#
+#   docker build -t openclaw:upstream .
+#   docker build --build-arg OPENCLAW_VERSION=<tag> -t openclaw:<tag> -f Dockerfile.cojad .
+
+ARG UPSTREAM_IMAGE=openclaw:upstream
+FROM ${UPSTREAM_IMAGE} AS upstream
+
+FROM upstream
+USER root
+
+# jq for JSON processing
+RUN apt-get update && \
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends jq && \
+  apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# 調整 UID/GID 以匹配 host
+# 直接編輯 passwd/group，避免 usermod 掃描整個 home 目錄（1.6GB cache）
+RUN sed -i 's/^node:x:1000:1000:/node:x:1001:1001:/' /etc/passwd \
+  && sed -i 's/^node:x:1000:/node:x:1001:/' /etc/group \
+  && rm -rf /home/node/.cache /home/node/.local \
+  && chown -R node:node /home/node
+
+# 用 COPY --from --chown 取代 chown -R /app，避免 overlay copy-up 逐檔開銷
+COPY --from=upstream --chown=1001:1001 /app /app
+
+# uv (Python 套件管理器)
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+# openclaw CLI wrapper
+RUN echo '#!/bin/sh\nnode /app/dist/index.js "$@"' > /usr/local/bin/openclaw \
+  && chmod +x /usr/local/bin/openclaw
+
+# Fix: runtime image does not include src/, but extensions import from
+# ../../../src/infra/outbound/send-deps.js at runtime via tsx.
+# Create the compiled ESM stub so all channel extensions load correctly.
+RUN mkdir -p /app/src/infra/outbound && cat > /app/src/infra/outbound/send-deps.js <<'STUB'
+// Compiled stub — mirrors src/infra/outbound/send-deps.ts
+const LEGACY_SEND_DEP_KEYS = {
+  whatsapp: "sendWhatsApp",
+  telegram: "sendTelegram",
+  discord: "sendDiscord",
+  slack: "sendSlack",
+  signal: "sendSignal",
+  imessage: "sendIMessage",
+  matrix: "sendMatrix",
+  msteams: "sendMSTeams",
+};
+export function resolveOutboundSendDep(deps, channelId) {
+  const dynamic = deps?.[channelId];
+  if (dynamic !== undefined) return dynamic;
+  const legacyKey = LEGACY_SEND_DEP_KEYS[channelId];
+  return deps?.[legacyKey];
+}
+STUB
+
+ARG OPENCLAW_VERSION=dev
+ENV OPENCLAW_BUNDLED_VERSION=${OPENCLAW_VERSION}
+
+USER node
+CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"]

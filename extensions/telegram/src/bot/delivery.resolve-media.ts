@@ -255,6 +255,22 @@ export async function resolveMedia(
   stickerMetadata?: StickerMetadata;
 } | null> {
   const msg = ctx.message;
+
+  // Short-circuit for injected messages that already have media saved to disk
+  const injectPath = (msg as unknown as Record<string, unknown>)._inject_file_path;
+  if (typeof injectPath === "string" && injectPath) {
+    const injectType = (msg as unknown as Record<string, unknown>)._inject_content_type;
+    const contentType = typeof injectType === "string" ? injectType : undefined;
+    const placeholder = contentType?.startsWith("image/")
+      ? "<media:image>"
+      : contentType?.startsWith("video/")
+        ? "<media:video>"
+        : contentType?.startsWith("audio/")
+          ? "<media:audio>"
+          : "<media:document>";
+    return { path: injectPath, contentType, placeholder };
+  }
+
   const stickerResolved = await resolveStickerMedia({
     msg,
     ctx,

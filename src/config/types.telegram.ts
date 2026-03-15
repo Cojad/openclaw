@@ -199,6 +199,16 @@ export type TelegramAccountConfig = {
    * Telegram expects unicode emoji (e.g., "👀") rather than shortcodes.
    */
   ackReaction?: string;
+  /**
+   * Telegram Update injection endpoint configuration.
+   * Allows external MTProto clients (Telethon/GramJS) to inject messages.
+   */
+  inject?: {
+    /** Enable the injection endpoint for this account. */
+    enabled?: boolean;
+    /** Bearer token for authenticating injection requests. */
+    token?: string;
+  };
 };
 
 export type TelegramTopicConfig = {

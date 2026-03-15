@@ -1,6 +1,6 @@
 {
-  "name": "openclaw",
-  "version": "2026.3.14",
+  "name": "openclaw-cojad",
+  "version": "2603.15.2100",
   "description": "Multi-channel AI gateway with extensible messaging integrations",
   "keywords": [],
   "homepage": "https://github.com/openclaw/openclaw#readme",
@@ -14,7 +14,8 @@
     "url": "git+https://github.com/openclaw/openclaw.git"
   },
   "bin": {
-    "openclaw": "openclaw.mjs"
+    "openclaw": "openclaw.mjs",
+    "openclaw-cojad": "openclaw.mjs"
   },
   "directories": {
     "doc": "docs",

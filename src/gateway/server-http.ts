@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import type { TlsOptions } from "node:tls";
+import type { WebSocketServer } from "ws";
 import {
   createServer as createHttpServer,
   type Server as HttpServer,
@@ -6,15 +8,20 @@ import {
   type ServerResponse,
 } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
-import type { TlsOptions } from "node:tls";
-import type { WebSocketServer } from "ws";
 import { handleSlackHttpRequest } from "../../extensions/slack/src/http/index.js";
-import { resolveAgentAvatar } from "../agents/identity-avatar.js";
-import { CANVAS_WS_PATH, handleA2uiHttpRequest } from "../canvas-host/a2ui.js";
 import type { CanvasHostHandler } from "../canvas-host/server.js";
-import { loadConfig } from "../config/config.js";
 import type { createSubsystemLogger } from "../logging/subsystem.js";
+import type { GatewayWsClient } from "./server/ws-types.js";
+import { resolveAgentAvatar } from "../agents/identity-avatar.js";
+import {
+  A2UI_PATH,
+  CANVAS_HOST_PATH,
+  CANVAS_WS_PATH,
+  handleA2uiHttpRequest,
+} from "../canvas-host/a2ui.js";
+import { loadConfig } from "../config/config.js";
 import { safeEqualSecret } from "../security/secret-equal.js";
+import { handleTelegramInjectRequest } from "../../extensions/telegram/src/inject-http.js";
 import {
   AUTH_RATE_LIMIT_SCOPE_HOOK_AUTH,
   createAuthRateLimiter,
@@ -70,7 +77,6 @@ import {
   type PluginRoutePathContext,
 } from "./server/plugins-http.js";
 import type { ReadinessChecker } from "./server/readiness.js";
-import type { GatewayWsClient } from "./server/ws-types.js";
 import { handleToolsInvokeHttpRequest } from "./tools-invoke-http.js";
 
 type SubsystemLogger = ReturnType<typeof createSubsystemLogger>;
@@ -818,6 +824,10 @@ export function createGatewayHttpServer(opts: {
             }),
         });
       }
+      requestStages.push({
+        name: "telegram-inject",
+        run: () => handleTelegramInjectRequest(req, res),
+      });
       if (openAiChatCompletionsEnabled) {
         requestStages.push({
           name: "openai",
