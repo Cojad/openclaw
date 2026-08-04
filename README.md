@@ -1,3 +1,9 @@
+> **⚠️ 此為 [`openclaw-cojad`](opus46-branch-info.md) 客製版 fork（[npm](https://www.npmjs.com/package/openclaw-cojad) · [GitHub](https://github.com/Cojad/openclaw/tree/opus46)）**
+> 基於 upstream [openclaw/openclaw](https://github.com/openclaw/openclaw) `main`，新增 Telegram Inject Endpoint、Session Image Stripping、Reply-to 修復等。
+> 安裝：`npm install -g openclaw-cojad`
+
+---
+
 # OpenClaw 🦞 — Your assistant, on your devices, in your chats
 
 <p align="center">
