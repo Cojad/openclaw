@@ -59,6 +59,21 @@ const MAX_PREVIEW_FLOOD_SUSPEND_MS = 60_000;
 // the first verbose commentary). The delete is scheduled DETACHED so the turn is
 // never stalled waiting on the dwell.
 const MIN_PREVIEW_DWELL_MS = 4_000;
+const THREAD_NOT_FOUND_RE = /400:\s*Bad Request:\s*message thread not found/i;
+const REPLY_NOT_FOUND_RE =
+  /400:\s*Bad Request:\s*(?:message to be replied|replied message) not found/i;
+
+type TelegramSendMessageParams = Parameters<Bot["api"]["sendMessage"]>[2];
+
+function hasNumericMessageThreadId(
+  params: TelegramSendMessageParams | undefined,
+): params is TelegramSendMessageParams & { message_thread_id: number } {
+  return (
+    typeof params === "object" &&
+    params !== null &&
+    typeof (params as { message_thread_id?: unknown }).message_thread_id === "number"
+  );
+}
 
 export type TelegramDraftStream = {
   update: (text: string) => void;

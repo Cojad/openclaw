@@ -84,8 +84,9 @@ function includeStickerDescription(params: {
 function resolveTelegramQuoteContext(params: {
   context: ReturnType<typeof resolveDispatchTelegramContext>;
   replyToMode: DispatchTelegramMessageParams["replyToMode"];
+  botId: number;
 }) {
-  const { context, replyToMode } = params;
+  const { context, replyToMode, botId } = params;
   const rawReplyQuoteText =
     context.ctxPayload.ReplyToIsQuote && typeof context.ctxPayload.ReplyToQuoteText === "string"
       ? context.ctxPayload.ReplyToQuoteText
@@ -134,8 +135,12 @@ function resolveTelegramQuoteContext(params: {
       );
     }
   }
+  // Skip reply-to for foreign bot messages — Telegram Bot API returns 400
+  // "replied message not found" when replying to another bot's message.
+  const senderIsForeignBot =
+    context.msg.from?.is_bot === true && context.msg.from.id !== botId;
   const draftReplyToMessageId =
-    replyToMode !== "off" && typeof context.msg.message_id === "number"
+    replyToMode !== "off" && typeof context.msg.message_id === "number" && !senderIsForeignBot
       ? replyQuoteTargetsBotMessage
         ? context.msg.message_id
         : (replyQuoteMessageId ?? context.msg.message_id)
@@ -310,7 +315,7 @@ export const dispatchTelegramMessage = async ({
   });
   const forceBlockStreamingForReasoning =
     resolvedReasoningLevel === "on" && streamMode !== "progress";
-  const quote = resolveTelegramQuoteContext({ context: dispatchContext, replyToMode });
+  const quote = resolveTelegramQuoteContext({ context: dispatchContext, replyToMode, botId: bot.botInfo.id });
   // Draft messages are provider-visible before final modifiers run. Suppress them when a hook
   // can rewrite or cancel, or the original payload can flash before the normal delivery gate.
   const hookRunner = getGlobalHookRunner();

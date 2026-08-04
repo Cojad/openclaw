@@ -34,6 +34,39 @@ import type { TelegramThreadSpec } from "./helpers.js";
 export { buildTelegramSendParams } from "../reply-parameters.js";
 
 const EMPTY_TEXT_ERR_RE = /message text is empty/i;
+const QUOTE_PARAM_RE = /\bquote not found\b|\bQUOTE_TEXT_INVALID\b|\bquote text invalid\b/i;
+const RICH_ENTITY_INVALID_RE =
+  /RICH_MESSAGE_(?:EMAIL|URL|MENTION|HASHTAG|CASHTAG|BOT_COMMAND|PHONE|BANK_CARD)_INVALID/i;
+const GrammyErrorCtor: typeof GrammyError | undefined =
+  typeof GrammyError === "function" ? GrammyError : undefined;
+const REPLY_NOT_FOUND_RE = /(?:message to be replied|replied message) not found/i;
+
+function isTelegramQuoteParamError(err: unknown): boolean {
+  if (GrammyErrorCtor && err instanceof GrammyErrorCtor) {
+    return QUOTE_PARAM_RE.test(err.description);
+  }
+  return QUOTE_PARAM_RE.test(formatErrorMessage(err));
+}
+
+
+function isTelegramReplyNotFoundError(err: unknown): boolean {
+  if (GrammyErrorCtor && err instanceof GrammyErrorCtor) {
+    return REPLY_NOT_FOUND_RE.test(err.description);
+  }
+  return REPLY_NOT_FOUND_RE.test(formatErrorMessage(err));
+}
+
+function hasReplyToParam(params: Record<string, unknown> | undefined): boolean {
+  if (!params) return false;
+  return typeof params.reply_to_message_id === "number" || params.reply_parameters != null;
+}
+
+function removeReplyToParam(params: Record<string, unknown> | undefined): Record<string, unknown> {
+  if (!params) return {};
+  const { reply_to_message_id: _a, reply_parameters: _b, ...rest } = params;
+  return rest;
+}
+
 function createTelegramDeliverySendRetry() {
   return createChannelApiRetryRunner({
     shouldRetry: (err) => isSafeToRetrySendError(err) || isTelegramRateLimitError(err),
@@ -51,23 +84,39 @@ export async function sendTelegramWithThreadFallback<T>(params: {
   shouldLog?: (err: unknown) => boolean;
 }): Promise<T> {
   const requestWithRetry = createTelegramDeliverySendRetry();
-  const { result } = await withTelegramNativeQuoteFallback({
-    label: params.operation,
-    requestParams: params.requestParams,
-    removeNativeQuoteParam: params.removeNativeQuoteParam,
-    request: (requestParams, operation) =>
-      withTelegramApiErrorLogging({
-        operation,
+  try {
+    const { result } = await withTelegramNativeQuoteFallback({
+      label: params.operation,
+      requestParams: params.requestParams,
+      removeNativeQuoteParam: params.removeNativeQuoteParam,
+      request: (requestParams, operation) =>
+        withTelegramApiErrorLogging({
+          operation,
+          runtime: params.runtime,
+          shouldLog: (error) =>
+            (params.shouldLog?.(error) ?? true) &&
+            !(
+              getTelegramNativeQuoteReplyMessageId(requestParams) && isTelegramQuoteParamError(error)
+            ),
+          fn: () => requestWithRetry(() => params.send(requestParams), operation),
+        }),
+    });
+    return result;
+  } catch (err) {
+    // Reply-not-found fallback: retry without reply_to_message_id.
+    if (hasReplyToParam(params.requestParams) && isTelegramReplyNotFoundError(err)) {
+      const retryParams = removeReplyToParam(params.requestParams);
+      params.runtime.log?.(
+        `telegram ${params.operation}: replied message not found; retrying without reply_to_message_id`,
+      );
+      return await withTelegramApiErrorLogging({
+        operation: `${params.operation} (replyless retry)`,
         runtime: params.runtime,
-        shouldLog: (error) =>
-          (params.shouldLog?.(error) ?? true) &&
-          !(
-            getTelegramNativeQuoteReplyMessageId(requestParams) && isTelegramQuoteParamError(error)
-          ),
-        fn: () => requestWithRetry(() => params.send(requestParams), operation),
-      }),
-  });
-  return result;
+        fn: () => params.send(retryParams),
+      });
+    }
+    throw err;
+  }
 }
 
 export async function sendTelegramText(
