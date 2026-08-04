@@ -1,6 +1,6 @@
 {
   "name": "openclaw",
-  "version": "2026.7.2",
+  "version": "2608.4.1300",
   "openclaw": {
     "schemaVersions": {
       "state": 6,
@@ -368,7 +368,9 @@
     "scripts/lib/package-dist-imports.mjs",
     "scripts/lib/recommended-tool-installs.json",
     "scripts/postinstall-bundled-plugins.mjs",
-    "scripts/windows-cmd-helpers.mjs"
+    "scripts/windows-cmd-helpers.mjs",
+    "src/",
+    "apps/shared/OpenClawKit/Sources/OpenClawKit/Resources/tool-display.json"
   ],
   "type": "module",
   "main": "dist/index.js",

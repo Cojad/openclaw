@@ -41,14 +41,6 @@ const GrammyErrorCtor: typeof GrammyError | undefined =
   typeof GrammyError === "function" ? GrammyError : undefined;
 const REPLY_NOT_FOUND_RE = /(?:message to be replied|replied message) not found/i;
 
-function isTelegramQuoteParamError(err: unknown): boolean {
-  if (GrammyErrorCtor && err instanceof GrammyErrorCtor) {
-    return QUOTE_PARAM_RE.test(err.description);
-  }
-  return QUOTE_PARAM_RE.test(formatErrorMessage(err));
-}
-
-
 function isTelegramReplyNotFoundError(err: unknown): boolean {
   if (GrammyErrorCtor && err instanceof GrammyErrorCtor) {
     return REPLY_NOT_FOUND_RE.test(err.description);

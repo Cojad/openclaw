@@ -482,6 +482,26 @@ describe("describeReplyTarget", () => {
     expect(result?.source).toBe("reply_to_message");
   });
 
+  it("flattens a rich_message reply target so the quoted context isn't dropped", () => {
+    const result = describeReplyTarget({
+      message_id: 2,
+      date: 1000,
+      chat: { id: 1, type: "private" },
+      reply_to_message: {
+        message_id: 1,
+        date: 900,
+        chat: { id: 1, type: "private" },
+        from: { id: 42, first_name: "Bot", is_bot: true },
+        rich_message: {
+          blocks: [{ type: "paragraph", text: ["see ", { type: "code", text: "rich" }, " reply"] }],
+        },
+      },
+    } as any);
+    expect(result?.body).toBe("see `rich` reply");
+    expect(result?.kind).toBe("reply");
+    expect(result?.source).toBe("reply_to_message");
+  });
+
   it("handles non-string reply text gracefully (issue #27201)", () => {
     const result = describeReplyTarget(
       asMalformedTelegramMessage({
@@ -521,7 +541,7 @@ describe("describeReplyTarget", () => {
     expect(result?.kind).toBe("reply");
   });
 
-  it("describes rich-message-only reply targets with a sanitized placeholder", () => {
+  it("describes rich-message-only reply targets with flattened rich content", () => {
     const result = describeReplyTarget({
       message_id: 2,
       date: 1000,
@@ -530,12 +550,12 @@ describe("describeReplyTarget", () => {
         message_id: 1,
         date: 900,
         chat: { id: 1, type: "private", first_name: "Test" },
-        rich_message: { blocks: [{ type: "paragraph" }] },
+        rich_message: { blocks: [{ type: "paragraph", text: ["Hello from rich"] }] },
         from: { id: 42, first_name: "Alice", is_bot: false },
       },
     } as TelegramMessage);
 
-    expect(result?.body).toBe("[unsupported Telegram rich_message received]");
+    expect(result?.body).toBe("Hello from rich");
     expect(result?.quoteSourceText).toBeUndefined();
   });
 

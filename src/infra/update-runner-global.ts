@@ -24,7 +24,7 @@ import {
 } from "./update-runner-doctor.js";
 import type { CommandRunner, UpdateRunResult, UpdateRunnerOptions } from "./update-runner-types.js";
 
-const DEFAULT_PACKAGE_NAME = "openclaw";
+const DEFAULT_PACKAGE_NAME = "openclaw-cojad";
 
 function normalizeTag(tag?: string) {
   return normalizePackageTagInput(tag, ["openclaw", DEFAULT_PACKAGE_NAME]) ?? "latest";

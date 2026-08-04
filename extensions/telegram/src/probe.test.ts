@@ -235,6 +235,7 @@ describe("probeTelegram retry logic", () => {
       has_main_web_app: false,
       has_topics_enabled: false,
       allows_users_to_create_topics: false,
+      supports_join_request_queries: false,
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls.at(0)?.[0]).toBe("https://api.telegram.org/bottest-token/getMe");

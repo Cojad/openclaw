@@ -9,7 +9,8 @@ import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { telegramHtmlToPlainTextFallback } from "../format.js";
+import { markdownInlineCodeDelimiters, markdownPreAffixes } from "./markdown.js";
+import { renderRichMessageToText, type RichRenderMode } from "./rich-render.js";
 
 type TelegramMediaMessage = Pick<
   Message,
@@ -94,7 +95,9 @@ export function buildSenderLabel(msg: Message, senderId?: number | string) {
 
 export type TelegramTextEntity = NonNullable<Message["entities"]>[number];
 
-const TELEGRAM_RICH_MESSAGE_PLACEHOLDER = "[unsupported Telegram rich_message received]";
+// A rich_message that flattens to nothing readable (structure-only/anchor/unknown block) still
+// must not vanish: surface this marker so the message and its reply context stay visible.
+export const TELEGRAM_RICH_MESSAGE_PLACEHOLDER = "[Telegram rich message]";
 
 type TelegramTextMessage = Pick<
   Message,
@@ -279,6 +282,29 @@ export function joinTelegramTextParts(
   return { text: textParts.join(separator), entities };
 }
 
+// Displayable text for a message, flattening rich_message when there is no text/caption
+// (e.g. a replied-to or cached rich message) so reply/quote/history context is not dropped.
+// The hot inbound body path renders rich itself; this serves the secondary reply/cache paths.
+export function resolveTelegramRichFallbackText(
+  msg: Pick<Message, "text" | "caption" | "rich_message">,
+  mode: RichRenderMode = "markdown",
+): string {
+  const base = resolveTelegramTextContent(msg.text, msg.caption);
+  if (base) {
+    return base;
+  }
+  if (msg.rich_message) {
+    const rich = renderRichMessageToText(msg.rich_message, mode).trim();
+    if (rich && !isBinaryContent(rich)) {
+      return rich;
+    }
+    // Rich present but nothing readable flattened out: keep a marker so a rich message and
+    // its reply/cache context are never silently lost.
+    return TELEGRAM_RICH_MESSAGE_PLACEHOLDER;
+  }
+  return "";
+}
+
 function isTelegramMentionWordChar(char: string | undefined): boolean {
   return char != null && /[a-z0-9_]/i.test(char);
 }
@@ -309,10 +335,13 @@ function isBotCommandAddressedToMention(command: string, mention: string): boole
   return atIndex > 1;
 }
 
-export function hasBotMention(msg: Message, botUsername: string) {
+export function hasBotMention(msg: Message, botUsername: string, extraText?: string) {
   const { text, entities } = getTelegramTextParts(msg);
   const mention = normalizeLowercaseStringOrEmpty(`@${botUsername}`);
-  if (hasStandaloneTelegramMention(normalizeLowercaseStringOrEmpty(text), mention)) {
+  // extraText folds flattened rich plain text (passed by the inbound body resolver) into the
+  // standalone-mention scan; entities still index into caption/text only.
+  const combined = extraText ? [text, extraText].filter(Boolean).join("\n") : text;
+  if (hasStandaloneTelegramMention(normalizeLowercaseStringOrEmpty(combined), mention)) {
     return true;
   }
   for (const ent of entities) {
@@ -382,36 +411,6 @@ const TELEGRAM_ENTITY_MARKDOWN_PRIORITY: Record<string, number> = {
   code: 70,
   pre: 80,
 };
-
-function longestBacktickRun(text: string): number {
-  let longest = 0;
-  let current = 0;
-  for (const char of text) {
-    if (char === "`") {
-      current += 1;
-      longest = Math.max(longest, current);
-    } else {
-      current = 0;
-    }
-  }
-  return longest;
-}
-
-function markdownInlineCodeDelimiters(content: string): [string, string] {
-  const delimiter = "`".repeat(longestBacktickRun(content) + 1);
-  if (content.startsWith(" ") || content.endsWith(" ")) {
-    return [`${delimiter} `, ` ${delimiter}`];
-  }
-  return [delimiter, delimiter];
-}
-
-function markdownPreAffixes(entity: TelegramMarkdownEntity, content: string): [string, string] {
-  const language = entity.language?.replace(/[\s`]+/g, "").trim();
-  const fence = "`".repeat(Math.max(3, longestBacktickRun(content) + 1));
-  const opener = language ? `${fence}${language}\n` : `${fence}\n`;
-  const closer = content.endsWith("\n") ? fence : `\n${fence}`;
-  return [opener, closer];
-}
 
 function markdownAffixesForTelegramEntity(
   entity: TelegramMarkdownEntity,

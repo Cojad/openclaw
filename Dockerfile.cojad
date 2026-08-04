@@ -10,10 +10,15 @@ FROM ${UPSTREAM_IMAGE} AS upstream
 FROM upstream
 USER root
 
-# jq for JSON processing
+# Runtime tools needed by agents and Codex subprocesses.
 RUN apt-get update && \
-  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends jq && \
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    jq bubblewrap ca-certificates curl git gnupg iproute2 iptables \
+    iputils-ping openssh-client procps wireguard-tools && \
   apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# codex CLI (@openai/codex) — OAuth refresh + sandbox exec for codex provider
+RUN npm install -g --omit=dev @openai/codex && npm cache clean --force
 
 # 調整 UID/GID 以匹配 host
 # 直接編輯 passwd/group，避免 usermod 掃描整個 home 目錄（1.6GB cache）
@@ -50,8 +55,23 @@ RUN rm -rf /app/dist/runtime \
      > /app/dist/runtime/index.ts \
   && chown -R 1001:1001 /app/dist/runtime
 
+# Fix: mattermost extension's dist/extensions/mattermost/src/channel.js is missing
+# (upstream build artifact issue: tsdown only compiles index.ts/setup-entry.ts entry points,
+# not lazily-referenced src/channel.ts). The new resolveBundledEntryModulePath security check
+# rejects missing files, causing "Config invalid" crash when iterateBootstrapChannelPlugins
+# loads ALL bundled channels. Removing the entire mattermost directory prevents both
+# "plugin entry path escapes plugin root" and "plugin manifest not found" errors.
+RUN rm -rf /app/dist/extensions/mattermost/
+
 ARG OPENCLAW_VERSION=dev
 ENV OPENCLAW_BUNDLED_VERSION=${OPENCLAW_VERSION}
+# Override upstream's default (/app/extensions) to force compiled .js plugins.
+# Upstream Dockerfile bakes ENV OPENCLAW_BUNDLED_PLUGINS_DIR=/app/extensions which
+# makes jiti load .ts source files at runtime. On Node v24, jiti (interopDefault:true +
+# tryNative:true) fails to correctly expose ESM-style exports from new .ts files such as
+# extensions/anthropic/cli-backend.ts, returning undefined instead of the module object.
+# Using dist/extensions/ (compiled .js) avoids the jiti interop issue entirely.
+ENV OPENCLAW_BUNDLED_PLUGINS_DIR=/app/dist/extensions
 
 USER node
 CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"]

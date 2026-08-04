@@ -112,6 +112,8 @@ minimumReleaseAgeExclude:
   - "sqlite-vec-*"
   - "rastermill"
   - "clawpdf"
+  - "zod"
+  - "@openclaw/fs-safe"
 
 nodeLinker: hoisted
 blockExoticSubdeps: true
@@ -150,6 +152,9 @@ overrides:
   yauzl: 3.4.0
   protobufjs: 8.7.1
   uuid: 14.0.1
+  # Bot API 10.1 rich_message types (inbound rich message support); dedupe grammy's
+  # exact-pinned nested copy so grammy/types re-export exposes RichMessage/RichBlock.
+  "@grammyjs/types": 3.28.0
 
 allowBuilds:
   "@openclaw/fs-safe": true

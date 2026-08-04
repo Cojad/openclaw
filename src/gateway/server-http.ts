@@ -559,12 +559,14 @@ export function createGatewayHttpServer(opts: {
       );
       requestStages.push({
         name: "telegram-inject",
-        run: () =>
-          handleTelegramInjectRequest(req, res, {
-            loadConfig,
+        run: async () => {
+          const { getBearerToken } = await getHttpAuthUtilsModule();
+          return handleTelegramInjectRequest(req, res, {
+            loadConfig: loadGatewayConfig,
             getBearerToken,
             saveMediaBuffer,
-          } satisfies TelegramInjectDeps),
+          } satisfies TelegramInjectDeps);
+        },
       });
       addRequestStage(
         "control-ui-approval-document",        isControlUiApprovalDocumentPath({

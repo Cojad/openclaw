@@ -271,6 +271,13 @@ const TelegramAccountSchemaBase = z
         "Trusted local filesystem roots for self-hosted Telegram Bot API absolute file_path values. Only absolute paths under these roots are read directly; all other absolute paths are rejected.",
       ),
     autoTopicLabel: AutoTopicLabelSchema,
+    inject: z
+      .object({
+        enabled: z.boolean().optional(),
+        token: z.string().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
