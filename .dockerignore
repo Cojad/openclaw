@@ -1,3 +1,5 @@
+Dockerfile
+docker-build.sh
 .git
 .worktrees
 

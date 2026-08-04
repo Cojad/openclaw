@@ -80,7 +80,7 @@ const OPENCLAW_REPO_URL = "https://github.com/openclaw/openclaw.git";
 const GIT_CLONE_BLOB_FILTER = "--filter=blob:none";
 const MAX_LOG_CHARS = 8000;
 
-export const DEFAULT_PACKAGE_NAME = "openclaw";
+export const DEFAULT_PACKAGE_NAME = "openclaw-cojad";
 const CORE_PACKAGE_NAMES = new Set([DEFAULT_PACKAGE_NAME]);
 
 /** Normalize a CLI tag/version/spec into the npm target form accepted by update flows. */

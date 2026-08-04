@@ -153,7 +153,32 @@ export type TelegramAccountConfig = CommonChannelMessagingConfig<
     trustedLocalFileRoots?: string[];
     /** Auto-rename DM forum topics on first message using LLM. Default: true. */
     autoTopicLabel?: AutoTopicLabelConfig;
+    /**
+     * Telegram Update injection endpoint configuration.
+     * Allows external MTProto clients (Telethon/GramJS) to inject messages.
+     */
+    inject?: {
+      /** Enable the injection endpoint for this account. */
+      enabled?: boolean;
+      /** Bearer token for authenticating injection requests. */
+      token?: string;
+    };
   };
+
+/**
+ * @deprecated Telegram DM topic session detection is automatic from bot
+ * getMe.has_topics_enabled. This legacy type remains for plugin SDK
+ * compatibility only.
+ */
+export type TelegramDmThreadReplies = "off" | "inbound" | "always";
+
+/**
+ * @deprecated Legacy config removed by doctor --fix.
+ */
+export type TelegramDmConfig = {
+  /** @deprecated Use bot getMe.has_topics_enabled; doctor removes this key. */
+  threadReplies?: TelegramDmThreadReplies;
+};
 
 export type TelegramTopicConfig = {
   requireMention?: boolean;

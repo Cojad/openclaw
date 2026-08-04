@@ -1,0 +1,57 @@
+# Dockerfile.cojad — 基於 upstream 映像的個人自訂層
+# 用法：先用原始 Dockerfile 建 upstream 映像，再用此檔案疊加自訂
+#
+#   docker build -t openclaw:upstream .
+#   docker build --build-arg OPENCLAW_VERSION=<tag> -t openclaw:<tag> -f Dockerfile.cojad .
+
+ARG UPSTREAM_IMAGE=openclaw:upstream
+FROM ${UPSTREAM_IMAGE} AS upstream
+
+FROM upstream
+USER root
+
+# jq for JSON processing
+RUN apt-get update && \
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends jq && \
+  apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# 調整 UID/GID 以匹配 host
+# 直接編輯 passwd/group，避免 usermod 掃描整個 home 目錄（1.6GB cache）
+RUN sed -i 's/^node:x:1000:1000:/node:x:1001:1001:/' /etc/passwd \
+  && sed -i 's/^node:x:1000:/node:x:1001:/' /etc/group \
+  && rm -rf /home/node/.cache /home/node/.local \
+  && chown -R node:node /home/node
+
+# 用 COPY --from --chown 取代 chown -R /app，避免 overlay copy-up 逐檔開銷
+COPY --from=upstream --chown=1001:1001 /app /app
+
+# uv (Python 套件管理器)
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+# openclaw CLI wrapper
+RUN echo '#!/bin/sh\nnode /app/dist/index.js "$@"' > /usr/local/bin/openclaw \
+  && chmod +x /usr/local/bin/openclaw
+
+# Fix: upstream runtime image excludes src/, but extensions need it:
+# 1. Extensions import from ../../../src/... via relative paths (jiti resolves at runtime)
+# 2. Plugin runtime discovery (resolvePluginRuntimeModulePath) expects dist/runtime/index.ts
+# Copy full src/ and create a re-export wrapper at dist/runtime/index.ts.
+# A symlink won't work: jiti resolves relative imports from the symlink's apparent path
+# (dist/runtime/), not the real path, so ../../agents/* would miss src/agents/.
+# The wrapper re-exports from ../../src/plugins/runtime/index.js, so jiti follows
+# the import chain and resolves subsequent relative imports from src/plugins/runtime/.
+COPY --chown=1001:1001 src /app/src
+# src/agents/tool-display.ts imports a JSON from apps/shared/; copy only that file
+COPY --chown=1001:1001 apps/shared/OpenClawKit/Sources/OpenClawKit/Resources/tool-display.json \
+  /app/apps/shared/OpenClawKit/Sources/OpenClawKit/Resources/tool-display.json
+RUN rm -rf /app/dist/runtime \
+  && mkdir -p /app/dist/runtime \
+  && printf 'export * from "../../src/plugins/runtime/index.js";\nexport { createPluginRuntime } from "../../src/plugins/runtime/index.js";\n' \
+     > /app/dist/runtime/index.ts \
+  && chown -R 1001:1001 /app/dist/runtime
+
+ARG OPENCLAW_VERSION=dev
+ENV OPENCLAW_BUNDLED_VERSION=${OPENCLAW_VERSION}
+
+USER node
+CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"]

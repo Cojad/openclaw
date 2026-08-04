@@ -24,6 +24,24 @@ import type { EmbeddedRunAttemptParams, EmbeddedRunAttemptResult } from "./types
 
 type PreparedStreamRuntime = Awaited<ReturnType<typeof prepareEmbeddedAttemptStreamRuntime>>;
 
+function stripImageBlocksFromMessages(messages: AgentMessage[]): boolean {
+  let didStrip = false;
+  for (const msg of messages) {
+    const content = (msg as { content?: unknown }).content;
+    if (!Array.isArray(content)) {
+      continue;
+    }
+    for (let i = content.length - 1; i >= 0; i--) {
+      const block = content[i];
+      if (block && typeof block === "object" && (block as { type?: unknown }).type === "image") {
+        content.splice(i, 1);
+        didStrip = true;
+      }
+    }
+  }
+  return didStrip;
+}
+
 type StreamCleanupInput = {
   attempt: EmbeddedRunAttemptParams;
   clearAttemptTimeoutTimers: () => void;
@@ -303,6 +321,13 @@ export async function runEmbeddedAttemptSettledPhase(
         takePendingMidTurnPrecheckRequest: contextGuards.takePendingMidTurnPrecheckRequest,
       },
     });
+
+    // Strip base64 image blocks from stored messages to reduce session file size.
+    // Text content (including MediaPath references) is preserved so images
+    // can be re-detected and re-loaded from disk on subsequent turns.
+    if (stripImageBlocksFromMessages(activeSession.messages)) {
+      activeSession.agent.replaceMessages(activeSession.messages);
+    }
 
     const afterTurn = await finalizeEmbeddedAttemptStreamPhase({
       attempt,

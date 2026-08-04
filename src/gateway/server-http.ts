@@ -11,6 +11,10 @@ import type { TlsOptions } from "node:tls";
 import type { WebSocketServer } from "ws";
 import { isCoreCanvasHostEnabled } from "../canvas/config.js";
 import { isCanvasDocumentHttpPath } from "../canvas/constants.js";
+import {
+  handleTelegramInjectRequest,
+  type TelegramInjectDeps,
+} from "../../extensions/telegram/src/inject-http.js";
 import { resolveBundledChannelGatewayAuthBypassPaths } from "../channels/plugins/gateway-auth-bypass.js";
 import { getRuntimeConfig } from "../config/io.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -20,6 +24,7 @@ import {
 } from "../infra/diagnostic-trace-context.js";
 import { isGatewayWorkAdmissionClosed } from "../process/gateway-work-admission.js";
 import { createLazyRuntimeModule } from "../shared/lazy-runtime.js";
+import { saveMediaBuffer } from "../media/store.js";
 import { resolveAssistantIdentity } from "./assistant-identity.js";
 import type { AuthRateLimiter } from "./auth-rate-limit.js";
 import {
@@ -552,9 +557,17 @@ export function createGatewayHttpServer(opts: {
             config: openAiChatCompletionsConfig,
           }),
       );
+      requestStages.push({
+        name: "telegram-inject",
+        run: () =>
+          handleTelegramInjectRequest(req, res, {
+            loadConfig,
+            getBearerToken,
+            saveMediaBuffer,
+          } satisfies TelegramInjectDeps),
+      });
       addRequestStage(
-        "control-ui-approval-document",
-        isControlUiApprovalDocumentPath({
+        "control-ui-approval-document",        isControlUiApprovalDocumentPath({
           basePath: controlUiBasePath,
           pathname: scopedRequestPath,
         }),

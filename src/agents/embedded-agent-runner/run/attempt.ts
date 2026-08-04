@@ -55,6 +55,298 @@ import {
 import { clearToolActivityRun } from "./tool-activity-heartbeat.js";
 import type { EmbeddedRunAttemptParams, EmbeddedRunAttemptResult } from "./types.js";
 
+type PreflightRecoveryBudgetSnapshot = Pick<
+  MidTurnPrecheckRequest,
+  "estimatedPromptTokens" | "promptBudgetBeforeReserve" | "overflowTokens"
+>;
+
+// Carries the measured prompt budget into the outer recovery loop. The synthetic
+// precheck error is only a routing signal, so compaction engines need these
+// fields to compact against the prompt OpenClaw actually rendered.
+function buildPreflightRecoveryBudgetSnapshot(snapshot: PreflightRecoveryBudgetSnapshot) {
+  return {
+    estimatedPromptTokens: snapshot.estimatedPromptTokens,
+    promptBudgetBeforeReserve: snapshot.promptBudgetBeforeReserve,
+    overflowTokens: snapshot.overflowTokens,
+  };
+}
+
+const aggregateToolResultPressureWarnings = new Set<string>();
+
+/**
+ * Strips image content blocks from all messages to reduce session file size.
+ * Image paths remain in text content (e.g., `MediaPath: /path/to/image`)
+ * so they can be re-detected and re-loaded from disk on subsequent turns.
+ */
+export function stripImageBlocksFromMessages(messages: AgentMessage[]): boolean {
+  let didStrip = false;
+  for (const msg of messages) {
+    const content = (msg as { content?: unknown }).content;
+    if (!Array.isArray(content)) {
+      continue;
+    }
+    for (let i = content.length - 1; i >= 0; i--) {
+      const block = content[i];
+      if (block && typeof block === "object" && (block as { type?: unknown }).type === "image") {
+        content.splice(i, 1);
+        didStrip = true;
+      }
+    }
+  }
+  return didStrip;
+}
+function summarizeMessagePayload(msg: AgentMessage): { textChars: number; imageBlocks: number } {
+  const content = (msg as { content?: unknown }).content;
+  if (typeof content === "string") {
+    return { textChars: content.length, imageBlocks: 0 };
+  }
+  if (!Array.isArray(content)) {
+    return { textChars: 0, imageBlocks: 0 };
+  }
+
+  let textChars = 0;
+  let imageBlocks = 0;
+  for (const block of content) {
+    if (!block || typeof block !== "object") {
+      continue;
+    }
+    const typedBlock = block as { type?: unknown; text?: unknown };
+    if (typedBlock.type === "image") {
+      imageBlocks++;
+      continue;
+    }
+    if (typeof typedBlock.text === "string") {
+      textChars += typedBlock.text.length;
+    }
+  }
+
+  return { textChars, imageBlocks };
+}
+
+function summarizeSessionContext(messages: AgentMessage[]): {
+  roleCounts: string;
+  totalTextChars: number;
+  totalImageBlocks: number;
+  maxMessageTextChars: number;
+} {
+  const roleCounts = new Map<string, number>();
+  let totalTextChars = 0;
+  let totalImageBlocks = 0;
+  let maxMessageTextChars = 0;
+
+  for (const msg of messages) {
+    const role = typeof msg.role === "string" ? msg.role : "unknown";
+    roleCounts.set(role, (roleCounts.get(role) ?? 0) + 1);
+
+    const payload = summarizeMessagePayload(msg);
+    totalTextChars += payload.textChars;
+    totalImageBlocks += payload.imageBlocks;
+    if (payload.textChars > maxMessageTextChars) {
+      maxMessageTextChars = payload.textChars;
+    }
+  }
+
+  return {
+    roleCounts:
+      [...roleCounts.entries()]
+        .toSorted((a, b) => a[0].localeCompare(b[0]))
+        .map(([role, count]) => `${role}:${count}`)
+        .join(",") || "none",
+    totalTextChars,
+    totalImageBlocks,
+    maxMessageTextChars,
+  };
+}
+
+function cloneHookMessages(messages: AgentMessage[]): AgentMessage[] {
+  return messages.map((message) => structuredClone(message));
+}
+
+function sessionMessagesContainIdempotencyKey(
+  messages: AgentMessage[],
+  idempotencyKey: string,
+): boolean {
+  return messages.some(
+    (message) =>
+      typeof (message as { idempotencyKey?: unknown }).idempotencyKey === "string" &&
+      (message as { idempotencyKey?: unknown }).idempotencyKey === idempotencyKey,
+  );
+}
+
+function flushSessionManagerTranscript(
+  sessionManager: ReturnType<typeof guardSessionManager>,
+): void {
+  (
+    sessionManager as unknown as {
+      replacePersistedTranscript?: () => void;
+    }
+  ).replacePersistedTranscript?.();
+}
+
+type OrphanRepairSessionManager = Pick<
+  ReturnType<typeof guardSessionManager>,
+  | "getLeafEntry"
+  | "getEntry"
+  | "appendThinkingLevelChange"
+  | "appendModelChange"
+  | "appendCustomEntry"
+  | "appendSessionInfo"
+  | "appendLabelChange"
+>;
+
+type OrphanRepairCandidate = {
+  messageEntry: SessionMessageEntry;
+  trailingEntries: SessionManagerEntry[];
+};
+
+function canSkipTrailingEntryForOrphanRepair(entry: SessionManagerEntry): boolean {
+  return (
+    entry.type === "thinking_level_change" ||
+    entry.type === "model_change" ||
+    entry.type === "custom" ||
+    entry.type === "label" ||
+    entry.type === "session_info"
+  );
+}
+
+function findTrailingMessageEntryForOrphanRepair(
+  sessionManager: OrphanRepairSessionManager,
+): OrphanRepairCandidate | undefined {
+  const visited = new Set<string>();
+  const trailingEntries: SessionManagerEntry[] = [];
+  let entry = sessionManager.getLeafEntry();
+  while (entry && entry.type !== "message" && canSkipTrailingEntryForOrphanRepair(entry)) {
+    if (visited.has(entry.id)) {
+      return undefined;
+    }
+    visited.add(entry.id);
+    trailingEntries.push(entry);
+    entry = entry.parentId ? sessionManager.getEntry(entry.parentId) : undefined;
+  }
+  return entry?.type === "message"
+    ? { messageEntry: entry, trailingEntries: trailingEntries.toReversed() }
+    : undefined;
+}
+
+function appendTrailingEntryForOrphanRepair(
+  sessionManager: OrphanRepairSessionManager,
+  entry: SessionManagerEntry,
+  replayedEntryIds: Map<string, string>,
+): void {
+  if (entry.type === "thinking_level_change") {
+    replayedEntryIds.set(entry.id, sessionManager.appendThinkingLevelChange(entry.thinkingLevel));
+    return;
+  }
+  if (entry.type === "model_change") {
+    replayedEntryIds.set(entry.id, sessionManager.appendModelChange(entry.provider, entry.modelId));
+    return;
+  }
+  if (entry.type === "custom") {
+    replayedEntryIds.set(entry.id, sessionManager.appendCustomEntry(entry.customType, entry.data));
+    return;
+  }
+  if (entry.type === "session_info") {
+    replayedEntryIds.set(entry.id, sessionManager.appendSessionInfo(entry.name ?? ""));
+    return;
+  }
+  if (entry.type === "label") {
+    const replayedTargetId = replayedEntryIds.get(entry.targetId);
+    if (!replayedTargetId && !sessionManager.getEntry(entry.targetId)) {
+      return;
+    }
+    const targetId = replayedTargetId ?? entry.targetId;
+    replayedEntryIds.set(entry.id, sessionManager.appendLabelChange(targetId, entry.label));
+  }
+}
+
+function replayTrailingEntriesForOrphanRepair(
+  sessionManager: OrphanRepairSessionManager,
+  trailingEntries: SessionManagerEntry[],
+): void {
+  const replayedEntryIds = new Map<string, string>();
+  for (const entry of trailingEntries) {
+    appendTrailingEntryForOrphanRepair(sessionManager, entry, replayedEntryIds);
+  }
+}
+
+type OrphanRepairPlan = Omit<OrphanRepairCandidate, "messageEntry"> & {
+  contextEnginePrompt: string;
+  messageEntry: SessionMessageEntry & { message: UserMessage };
+  strategy: MessageMergeStrategy;
+  removeLeaf: boolean;
+};
+
+function isUserSessionMessageEntry(
+  entry: SessionMessageEntry,
+): entry is SessionMessageEntry & { message: UserMessage } {
+  return entry.message.role === "user";
+}
+
+function resolveOrphanRepairPlan(params: {
+  sessionManager: OrphanRepairSessionManager;
+  prompt: string;
+  trigger: EmbeddedRunAttemptParams["trigger"];
+}): OrphanRepairPlan | undefined {
+  const candidate = findTrailingMessageEntryForOrphanRepair(params.sessionManager);
+  if (!candidate || !isUserSessionMessageEntry(candidate.messageEntry)) {
+    return undefined;
+  }
+  const strategy = resolveMessageMergeStrategy();
+  const merge = strategy.mergeOrphanedTrailingUserPrompt({
+    prompt: params.prompt,
+    trigger: params.trigger,
+    leafMessage: candidate.messageEntry.message,
+  });
+  return {
+    contextEnginePrompt: merge.prompt,
+    messageEntry: candidate.messageEntry,
+    trailingEntries: candidate.trailingEntries,
+    strategy,
+    removeLeaf: merge.removeLeaf,
+  };
+}
+
+function repairAttemptToolUseResultPairing(
+  messages: AgentMessage[],
+  isOpenAIResponsesApi: boolean,
+): AgentMessage[] {
+  return sanitizeToolUseResultPairing(messages, {
+    erroredAssistantResultPolicy: "drop",
+    ...(isOpenAIResponsesApi ? { missingToolResultText: "aborted" } : {}),
+  });
+}
+
+function shouldPreservePromptErrorAfterCleanupError(params: {
+  promptError: unknown;
+  cleanupError: unknown;
+}): boolean {
+  return (
+    Boolean(params.promptError) &&
+    params.cleanupError instanceof EmbeddedAttemptSessionTakeoverError
+  );
+}
+
+class EmbeddedAttemptPromptErrorWithCleanupTakeoverError extends Error {
+  readonly promptError: unknown;
+  readonly cleanupError: EmbeddedAttemptSessionTakeoverError;
+
+  constructor(params: { promptError: unknown; cleanupError: EmbeddedAttemptSessionTakeoverError }) {
+    super(formatErrorMessage(params.promptError), { cause: params.cleanupError });
+    this.name = "EmbeddedAttemptSessionTakeoverError";
+    this.promptError = params.promptError;
+    this.cleanupError = params.cleanupError;
+  }
+}
+
+function hasVisiblePendingToolMediaReply(
+  reply: { mediaUrls?: string[]; audioAsVoice?: boolean } | null | undefined,
+): boolean {
+  return Boolean(
+    reply &&
+    ((reply.mediaUrls ?? []).some((url) => url.trim().length > 0) || reply.audioAsVoice === true),
+  );
+}
+
 export async function runEmbeddedAttempt(
   params: EmbeddedRunAttemptParams,
 ): Promise<EmbeddedRunAttemptResult> {
