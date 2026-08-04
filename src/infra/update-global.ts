@@ -56,7 +56,7 @@ export type ResolvedGlobalInstallTarget = ResolvedGlobalInstallCommand & {
   directNodeModulesRoot?: boolean;
 };
 
-const PRIMARY_PACKAGE_NAME = "openclaw";
+const PRIMARY_PACKAGE_NAME = "openclaw-cojad";
 const ALL_PACKAGE_NAMES = [PRIMARY_PACKAGE_NAME] as const;
 const GLOBAL_RENAME_PREFIX = ".";
 /** npm-compatible spec used when the user asks to install the moving main branch. */
