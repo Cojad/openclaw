@@ -83,7 +83,7 @@ export type UpdateCheckResult = {
 };
 
 const PUBLIC_NPM_REGISTRY_URL = "https://registry.npmjs.org/";
-const PUBLIC_NPM_PACKAGE_NAME = "openclaw";
+const PUBLIC_NPM_PACKAGE_NAME = "openclaw-cojad";
 
 function isLoopbackNpmRegistry(raw: string): boolean {
   try {

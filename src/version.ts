@@ -4,7 +4,7 @@ import { normalizeOptionalString } from "@openclaw/normalization-core/string-coe
 
 // oxlint-disable-next-line eslint/no-underscore-dangle -- Bundled builds replace this compile-time define identifier.
 declare const __OPENCLAW_VERSION__: string | undefined;
-const CORE_PACKAGE_NAME = "openclaw";
+const CORE_PACKAGE_NAME = "openclaw-cojad";
 
 const PACKAGE_JSON_CANDIDATES = [
   "../package.json",
