@@ -33,12 +33,17 @@ export const CONFIGURED_RUNTIME_PLUGIN_INSTALL_CANDIDATES: readonly ConfiguredRu
       trustedSourceLinkedOfficialInstall: true,
     },
     // Runtime-only configs do not have a provider/channel integration catalog entry.
+    // cojad fork: codex is NOT version-bound to core. Upstream pins codex to the
+    // exact core release cohort, but our date-tag core versions (e.g. 2608.x) and
+    // beta cores can run ahead of the newest published @openclaw/codex, so binding
+    // makes doctor re-refresh codex every boot — the migration fingerprint never
+    // settles and the gateway crash-loops with "migration inputs changed during
+    // startup convergence". Unbinding lets codex resolve @beta and converge.
     {
       pluginId: "codex",
       label: "Codex",
       npmSpec: "@openclaw/codex",
       trustedSourceLinkedOfficialInstall: true,
-      versionBoundToOpenClaw: true,
     },
   ];
 
