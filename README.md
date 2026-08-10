@@ -1,5 +1,9 @@
 # OpenClaw 🦞 — Your assistant, on your devices, in your chats
 
+> **⚠️ 此為 [`openclaw-cojad`](opus46-branch-info.md) 客製版 fork ([npm](https://www.npmjs.com/package/openclaw-cojad) · [GitHub](https://github.com/Cojad/openclaw/tree/opus46))**
+> 基於 upstream [openclaw/openclaw](https://github.com/openclaw/openclaw) `main`, 僅保留 Session Image Stripping 與自訂 Docker 建置.
+> 安裝: `npm install -g openclaw-cojad`
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/openclaw/openclaw/main/docs/assets/openclaw-banner-light.png">
