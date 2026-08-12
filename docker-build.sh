@@ -3,19 +3,46 @@ set -e
 
 VERSION="${1:-$(TZ=Asia/Taipei date +"%y%m.%-d.%-H%M")}"
 IMAGE="cojad/openclaw"
-GUARD_IMAGE="${IMAGE}:${VERSION}"
+# Promote-tag pattern: build to a private staging tag, run the guards against it,
+# and only promote to ${VERSION} + latest AFTER every guard passes. A churning or
+# broken image therefore never exists under a deployable tag — the cron's deploy
+# step finds no ${IMAGE}:${VERSION} and refuses to ship it. (2026-08-09 incident:
+# the guard only gated `latest`, but the cron deployed the explicit ${VERSION}
+# tag, which was created before the guards -> a churning image reached prod.)
+STAGING="${IMAGE}:staging-$$-$(TZ=Asia/Taipei date +%H%M%S)"
+GUARD_IMAGE="${STAGING}"
+
+# Optional: seed the boot smoke test with a COPY of real prod state+config so
+# state/config-dependent failures (schema mismatch, removed config keys, memory
+# core init) are caught in the build, not on the live container. Set to a config
+# root that contains .openclaw/ (e.g. /x/srv/bot/eagle/config). Channels are NOT
+# started during this check, so it never hijacks the live Telegram poller.
+SMOKE_STATE_SRC="${OPENCLAW_SMOKE_STATE_SRC:-}"
 
 # ---------------------------------------------------------------------------
-# Why the guards below exist (codex@beta version-bound churn, 2026-08-08):
-#   `codex` is a version-bound official runtime plugin — doctor keeps it on the
-#   same release cohort as core. When core is ahead of the newest published
-#   @openclaw/codex (and codex is NOT bundled into dist), every boot re-refreshes
-#   the plugin, the startup migration fingerprint never settles, and the gateway
-#   crash-loops with "migration inputs changed during startup convergence" →
-#   Exited(1), and no channel (Telegram etc.) ever starts. The container still
-#   reports docker "healthy" for a while, so the breakage is silent.
-#   Guard 1 is a fast heuristic; Guard 2 boots the image and is the real gate.
+# Why the guards exist:
+#  - codex@beta version-bound churn (2026-08-08): `codex` is a version-bound
+#    official runtime plugin; when core runs ahead of the newest published
+#    @openclaw/codex, every boot re-refreshes it, the migration fingerprint never
+#    settles, and the gateway crash-loops with "migration inputs changed during
+#    startup convergence" -> Exited(1), no channel starts, yet docker reports
+#    healthy for a while (silent breakage).
+#  - state/config drift (2026-08-09): a new upstream removed a config key
+#    (memory.backend), changed table schemas, and hit a memory-core module
+#    assertion — none reproducible against a clean config, only against real state.
+#  Guard 1: fast static heuristic. Guard 2a: clean-config two-boot convergence.
+#  Guard 2b (opt-in): doctor --fix against a copy of real state.
 # ---------------------------------------------------------------------------
+
+# Single cleanup owner: drop the staging image + smoke volume on any exit path so
+# a failed build leaves nothing deployable and no dangling resources.
+SMOKE_VOL=""
+cleanup() {
+  [ -n "${SMOKE_VOL}" ] && docker volume rm "${SMOKE_VOL}" >/dev/null 2>&1 || true
+  docker image inspect "${STAGING}" >/dev/null 2>&1 && docker rmi "${STAGING}" >/dev/null 2>&1 || true
+  rm -f "${SMOKE_LOG:-}" 2>/dev/null || true
+}
+trap cleanup EXIT
 
 echo "==> Building upstream OpenClaw image..."
 docker build \
@@ -23,11 +50,11 @@ docker build \
   -f Dockerfile .
 
 echo ""
-echo "==> Building custom image: ${IMAGE}:${VERSION}"
+echo "==> Building custom image (staging): ${STAGING}"
 docker build \
   --build-arg UPSTREAM_IMAGE=openclaw:upstream \
   --build-arg OPENCLAW_VERSION="${VERSION}" \
-  -t "${GUARD_IMAGE}" \
+  -t "${STAGING}" \
   -f Dockerfile.cojad .
 
 # ---------------------------------------------------------------------------
@@ -46,8 +73,7 @@ else
     echo "   Image needs codex from npm but none is resolvable -> it will churn on boot."
     exit 1
   fi
-  # Heuristic only: version-bound match semantics are fuzzy, so a train mismatch
-  # is a WARNING (guard 2 is authoritative), but core ahead of codex is the exact
+  # Heuristic only (guard 2 is authoritative): core ahead of codex is the exact
   # shape that caused the 2026.8.1-beta churn.
   core_mm="$(printf '%s' "${VERSION}" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')"
   codex_mm="$(printf '%s' "${CODEX_BETA}" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')"
@@ -60,22 +86,15 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Guard 2/2 — boot smoke test: refuse images that crash-loop on startup (real gate)
-# Two boots on a persistent home: a first-ever boot legitimately installs the
-# configured runtime plugin (codex) and reports "restart needed" — that is NOT
-# churn. Only the SECOND boot is authoritative: a healthy image converges to
-# "http server listening"; a version-bound-churn image re-refreshes forever.
+# Guard 2a — boot smoke test (clean config, 2 boots): catches convergence churn.
+# A first-ever boot legitimately installs the configured runtime plugin (codex)
+# and reports "restart needed" — NOT churn. Only the SECOND boot is authoritative.
 # ---------------------------------------------------------------------------
 echo ""
 echo "==> [guard 2/2] boot smoke test (startup convergence, 2 boots)..."
 SMOKE_LOG="$(mktemp)"
 SMOKE_VOL="openclaw-smoke-$$"
 docker volume create "${SMOKE_VOL}" >/dev/null
-smoke_cleanup() { docker volume rm "${SMOKE_VOL}" >/dev/null 2>&1 || true; rm -f "${SMOKE_LOG}"; }
-trap smoke_cleanup EXIT
-# Minimal config: configures the codex runtime (so doctor exercises the exact
-# install path production hits) and binds loopback so the gateway can reach ready
-# without an auth token.
 SMOKE_CFG='{"gateway":{"mode":"local","bind":"loopback"},"agents":{"defaults":{"model":{"primary":"openai/gpt-5.5"},"models":{"openai/gpt-5.5":{"agentRuntime":{"id":"codex"}}}}},"plugins":{"entries":{"codex":{"enabled":true}}}}'
 
 echo "    boot 1/2 (install configured plugins)..."
@@ -91,27 +110,74 @@ timeout 150 docker run --rm -v "${SMOKE_VOL}:/home/node" \
   'exec node dist/index.js gateway --allow-unconfigured' \
   >> "${SMOKE_LOG}" 2>&1 || true
 
-# Only the second boot's outcome is authoritative.
 BOOT2_LOG="$(sed -n '/===SMOKE_BOOT_2===/,$p' "${SMOKE_LOG}")"
 if printf '%s' "${BOOT2_LOG}" | grep -qiE 'migration inputs changed during startup convergence|refusing to report the gateway ready|Refreshed stale configured plugin'; then
-  echo "X [guard 2/2] convergence churn on second boot -> image would crash-loop. Not shipping:"
+  echo "X [guard 2a] convergence churn on second boot -> image would crash-loop. Not shipping:"
   printf '%s' "${BOOT2_LOG}" | grep -iE 'Refreshed stale configured plugin|migration inputs changed|refusing to report' | sort -u | head -5
   exit 1
 fi
 if ! printf '%s' "${BOOT2_LOG}" | grep -qiE 'http server listening'; then
-  echo "X [guard 2/2] gateway never reported ready on second boot. Not shipping:"
+  echo "X [guard 2a] gateway never reported ready on second boot. Not shipping:"
   printf '%s' "${BOOT2_LOG}" | tail -15
   exit 1
 fi
-echo "    second boot reached ready, no convergence churn. OK"
-smoke_cleanup
+echo "    [2a] clean-config second boot reached ready, no churn. OK"
+docker volume rm "${SMOKE_VOL}" >/dev/null 2>&1 || true
+SMOKE_VOL=""
+
+# ---------------------------------------------------------------------------
+# Guard 2b (opt-in) — doctor --fix against a COPY of real prod state/config.
+# Catches schema mismatches, removed config keys, and migration/memory failures
+# that only surface against real data. Runs doctor only (no gateway boot), so no
+# channel starts and the live Telegram poller is never touched.
+# ---------------------------------------------------------------------------
+if [ -n "${SMOKE_STATE_SRC}" ] && [ -d "${SMOKE_STATE_SRC}/.openclaw" ]; then
+  echo ""
+  echo "==> [guard 2b] doctor --fix against real state copy (${SMOKE_STATE_SRC})..."
+  STATE_VOL="openclaw-state-smoke-$$"
+  SMOKE_VOL="${STATE_VOL}"   # hand ownership to cleanup()
+  docker volume create "${STATE_VOL}" >/dev/null
+  # Seed the volume with real config + state DBs, EXCLUDING the giant dirs
+  # (media/npm/plugin caches/logs/queues) that are irrelevant to migration checks.
+  docker run --rm -v "${STATE_VOL}:/home/node" -v "${SMOKE_STATE_SRC}:/src:ro" \
+    --entrypoint sh "${GUARD_IMAGE}" -c '
+      mkdir -p /home/node/.openclaw &&
+      tar -C /src/.openclaw \
+        --exclude=media --exclude=npm --exclude=plugin-runtime-deps \
+        --exclude=plugin-skills --exclude=logs --exclude=.git \
+        --exclude=session-delivery-queue --exclude=media-cache \
+        -cf - . 2>/dev/null | tar -C /home/node/.openclaw -xf - &&
+      chown -R node:node /home/node 2>/dev/null || true'
+  STATE_LOG="$(mktemp)"
+  timeout 240 docker run --rm -v "${STATE_VOL}:/home/node" \
+    --entrypoint sh "${GUARD_IMAGE}" -c \
+    'exec node dist/index.js doctor --fix' \
+    > "${STATE_LOG}" 2>&1 || true
+  if grep -qiE 'schema is incomplete or noncanonical|does not match [0-9]|Invalid config|ERR_INTERNAL_ASSERTION|did not complete cleanly' "${STATE_LOG}"; then
+    echo "X [guard 2b] doctor --fix failed against real state -> image would break prod. Not shipping:"
+    grep -iE 'schema is incomplete|does not match|Invalid config|ERR_INTERNAL_ASSERTION|did not complete' "${STATE_LOG}" | sort -u | head -8
+    rm -f "${STATE_LOG}"
+    exit 1
+  fi
+  echo "    [2b] doctor --fix converged against real state. OK"
+  rm -f "${STATE_LOG}"
+  docker volume rm "${STATE_VOL}" >/dev/null 2>&1 || true
+  SMOKE_VOL=""
+else
+  echo ""
+  echo "==> [guard 2b] skipped (set OPENCLAW_SMOKE_STATE_SRC=<config root> to check real state)."
+fi
+
+# ---------------------------------------------------------------------------
+# All guards passed -> promote staging to the deployable tags.
+# ---------------------------------------------------------------------------
+docker tag "${STAGING}" "${IMAGE}:${VERSION}"
+docker tag "${STAGING}" "${IMAGE}:latest"
+docker rmi "${STAGING}" >/dev/null 2>&1 || true
 trap - EXIT
 
-# Guards passed -> safe to publish latest.
-docker tag "${GUARD_IMAGE}" "${IMAGE}:latest"
-
 echo ""
-echo "Built successfully:"
+echo "Built successfully (guards passed, promoted from staging):"
 echo "   - ${IMAGE}:${VERSION}"
 echo "   - ${IMAGE}:latest"
 echo ""
