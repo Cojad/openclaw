@@ -8,7 +8,7 @@ import {
 } from "../../plugins/runtime-degraded-state.js";
 import { isDefaultAgentRuntimeId, OPENCLAW_AGENT_RUNTIME_ID } from "../agent-runtime-id.js";
 import { normalizeOptionalAgentRuntimeId } from "../agent-runtime-id.js";
-import { isCliRuntimeAliasForProvider } from "../model-runtime-aliases.js";
+import { isCliRuntimeAlias, isCliRuntimeAliasForProvider } from "../model-runtime-aliases.js";
 import { resolveAgentHarnessPolicy } from "./policy.js";
 import { resolveAgentHarnessOwnerPluginIds } from "./runtime-plugin-load-plan.js";
 
@@ -121,6 +121,13 @@ export async function ensureSelectedAgentHarnessPlugin(params: {
   if (
     isDefaultAgentRuntimeId(runtime) ||
     runtime === OPENCLAW_AGENT_RUNTIME_ID ||
+    // CLI runtimes (claude-cli, google-gemini-cli, ...) run through the node-host
+    // CLI backend, never as an in-process plugin harness, so they must never be
+    // required in the plugin registry. The provider-scoped check below misses
+    // subagent-announce/handoff contexts that pass a non-canonical provider (the
+    // model-ref id instead of the backend's canonical provider), which wrongly
+    // threw "not present in the prepared registry" and stalled completion delivery.
+    isCliRuntimeAlias(runtime) ||
     isCliRuntimeAliasForProvider({
       runtime,
       provider: params.provider,

@@ -2,6 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { createEmptyPluginRegistry } from "../../plugins/registry-empty.js";
+import { testing as cliBackendsTesting } from "../cli-backends.test-support.js";
 import { resolveAgentRuntimePluginLoadPlan } from "./runtime-plugin-load-plan.js";
 import {
   ensureSelectedAgentHarnessPlugin,
@@ -60,6 +61,34 @@ describe("harness runtime plugins", () => {
     });
 
     expect(pluginRegistry.agentHarnesses).toHaveLength(1);
+  });
+
+  it("exempts CLI runtime backends (claude-cli) from the prepared-registry requirement", async () => {
+    // Regression: the subagent-announce direct handoff resolves a claude-cli
+    // parent's harness with a non-canonical provider (the model-ref id, not the
+    // backend's canonical provider "anthropic"), so the provider-scoped alias
+    // check misses and it used to throw "not present in the prepared registry",
+    // stalling subagent completion delivery. CLI runtimes are node-host backends,
+    // never in-process plugin harnesses, so an empty harness registry must not throw.
+    cliBackendsTesting.setDepsForTest({
+      resolveRuntimeCliBackends: () =>
+        [{ id: "claude-cli", modelProvider: "anthropic", pluginId: "anthropic" }] as never,
+    });
+    try {
+      const pluginRegistry = createEmptyPluginRegistry();
+      await expect(
+        ensureSelectedAgentHarnessPlugin({
+          provider: "claude-cli",
+          modelId: "claude-opus-5",
+          agentHarnessRuntimeOverride: "claude-cli",
+          workspaceDir: "/tmp/workspace",
+          pluginRegistry,
+        }),
+      ).resolves.toBeUndefined();
+      expect(pluginRegistry.agentHarnesses).toHaveLength(0);
+    } finally {
+      cliBackendsTesting.resetDepsForTest();
+    }
   });
 
   it("force-activates a default-disabled harness owner selected for a run", () => {
