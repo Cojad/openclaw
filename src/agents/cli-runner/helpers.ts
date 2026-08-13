@@ -23,6 +23,7 @@ import { privateFileStore } from "../../infra/private-file-store.js";
 import { tempWorkspace } from "../../infra/private-temp-workspace.js";
 import { resolvePreferredOpenClawTmpDir } from "../../infra/tmp-openclaw-dir.js";
 import type { ImageContent } from "../../llm/types.js";
+import { getDefaultMediaLocalRoots } from "../../media/local-roots.js";
 import type { MediaFact } from "../../media/media-facts.js";
 import type { PromptImageOrderEntry } from "../../media/prompt-image-order.js";
 import { KeyedAsyncQueue } from "../../plugin-sdk/keyed-async-queue.js";
@@ -407,6 +408,11 @@ export async function prepareCliPromptImagePayload(params: {
         prompt: imagePrompt,
         media: params.media,
         workspaceDir: params.workspaceDir,
+        // Inbound media is staged under the agent workspace (e.g. clawd/media/inbound),
+        // which is not in the process default media roots. Without the workspace root the
+        // CLI image hydrate fails "not under an allowed directory" and the turn falls back
+        // off the CLI backend. Allow both default roots and the agent workspace.
+        localRoots: [...getDefaultMediaLocalRoots(), params.workspaceDir],
         model: { input: ["text", "image"] },
         existingImages: params.images,
         imageOrder: params.imageOrder,
