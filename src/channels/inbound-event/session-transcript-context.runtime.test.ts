@@ -85,6 +85,37 @@ describe("session transcript inbound context", () => {
     ]);
   });
 
+  it("skips transcript injection entirely when OPENCLAW_DISABLE_SESSION_TRANSCRIPT=1", async () => {
+    // Fork toggle: with the env flag set, the agent's own canonical transcript
+    // turns (rendered as "#session:<id>" prompt lines) must not be merged, and
+    // the transcript store must not even be read.
+    readRecent.mockResolvedValue([
+      { id: "u1", role: "user", text: "cached user turn", timestamp: 1_000 },
+    ]);
+    const inbound = [
+      { sender: "Alice", body: "new live turn", timestamp: 3_000, messageId: "m2" },
+    ];
+    const ctx = context({ InboundHistory: [...inbound] });
+    const prev = process.env.OPENCLAW_DISABLE_SESSION_TRANSCRIPT;
+    process.env.OPENCLAW_DISABLE_SESSION_TRANSCRIPT = "1";
+    try {
+      await mergeSessionTranscriptContext({
+        agentId: "main",
+        ctx,
+        sessionKey: ctx.SessionKey!,
+        storePath: "/tmp/sessions.json",
+      });
+    } finally {
+      if (prev === undefined) {
+        delete process.env.OPENCLAW_DISABLE_SESSION_TRANSCRIPT;
+      } else {
+        process.env.OPENCLAW_DISABLE_SESSION_TRANSCRIPT = prev;
+      }
+    }
+    expect(ctx.InboundHistory).toEqual(inbound);
+    expect(readRecent).not.toHaveBeenCalled();
+  });
+
   it("uses channel projection ids to avoid duplicating rendered assistant replies", async () => {
     readRecent.mockResolvedValue([
       { id: "a1", role: "assistant", text: "**same answer**", timestamp: 2_000 },

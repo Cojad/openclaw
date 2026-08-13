@@ -106,6 +106,11 @@ export async function mergeSessionTranscriptContext(params: {
   const options = params.ctx.SessionTranscriptContext;
   const limit = Math.max(0, Math.floor(options?.historyLimit ?? 0));
   if (
+    // Fork toggle: suppress injecting the agent's own canonical transcript turns
+    // (the "#session:<turn-id>" context lines) into the prompt. Env-gated so it
+    // survives image rebuilds and flips via container recreate without a rebuild.
+    // Unset/any-other value keeps the default behavior unchanged.
+    process.env.OPENCLAW_DISABLE_SESSION_TRANSCRIPT === "1" ||
     limit === 0 ||
     isSessionBoundaryCommandText(params.ctx.CommandBody ?? params.ctx.RawBody, {
       botUsername: params.ctx.BotUsername,
