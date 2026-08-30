@@ -517,6 +517,21 @@ export function getActiveAgentRunDelegatedAuthority(
     : undefined;
 }
 
+/**
+ * cojad fork: the run's current registry delegated authority, ignoring which
+ * operational instance is asking. ONLY for the deliberate fail-open authority
+ * override in gateway/agent-runtime-identity-token.ts (single-tenant deployment),
+ * which binds a stale-instance token to the run's current authority instead of
+ * failing closed on a benign mid-run lifecycle-generation rotation. Not part of the
+ * upstream authority model — never use for a real authorization decision; use
+ * getActiveAgentRunDelegatedAuthority for that.
+ */
+export function peekCurrentRunDelegatedAuthorityForForkOverride(
+  runId: string,
+): AgentRunDelegatedAuthority | undefined {
+  return getAgentRunRegistryState().contexts.get(runId)?.delegatedAuthority;
+}
+
 export function validateAgentRunDelegatedAuthority(authority: AgentRunDelegatedAuthority): boolean {
   const active = getActiveAgentRunDelegatedAuthority(authority.operationalRunInstance);
   return (

@@ -12,16 +12,21 @@ import type { ChannelId } from "../channels/plugins/types.public.js";
 import type { InternalChannelThreadingToolContext } from "../channels/threading-tool-context-internal.js";
 import {
   getActiveAgentRunDelegatedAuthority,
+  peekCurrentRunDelegatedAuthorityForForkOverride,
   validateAgentRunDelegatedAuthority,
   type AgentRunDelegatedAuthority,
 } from "../infra/agent-run-registry.js";
 import { ensureExecApprovalsSnapshot, loadExecApprovalsAsync } from "../infra/exec-approvals.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import { normalizeOptionalAccountId } from "../routing/account-id.js";
 import { normalizeAgentId } from "../routing/session-key.js";
 import { safeEqualSecret } from "../security/secret-equal.js";
 import type { CronCreatorAuthorityGrant } from "./cron-creator-authority-grant.js";
 import type { AgentRuntimeMessageActionContext } from "./message-action-turn-capability.js";
 import type { WorkerSessionTurnClaim } from "./worker-environments/placement-record.js";
+
+// cojad fork: observability for the deliberate fail-open authority override below.
+const forkAuthLog = createSubsystemLogger("gateway/authority-override");
 
 const AGENT_RUNTIME_IDENTITY_TOKEN_CONTEXT = "openclaw:gateway-agent-runtime-identity-token:v1";
 const AGENT_RUNTIME_IDENTITY_TOKEN_KIND = "agent-runtime";
@@ -497,12 +502,33 @@ function prepareAgentRuntimeIdentityTokenPayload(params: AgentRuntimeIdentityTok
   if (!operationalInstanceId || !operationalRunId) {
     throw new Error("agent runtime identity requires an operational run instance");
   }
-  const activeAuthority = getActiveAgentRunDelegatedAuthority({
+  let activeAuthority = getActiveAgentRunDelegatedAuthority({
     instanceId: operationalInstanceId,
     runId: operationalRunId,
   });
   if (!activeAuthority) {
-    throw new Error("agent runtime identity requires active delegated run authority");
+    // cojad fork — DELIBERATE fail-OPEN (2026-08-30, 柯姊 decision; single-tenant personal
+    // deployment). Upstream fails side-effect tools closed here when the run's original
+    // authority claim no longer matches the live registry (mid-run lifecycle-generation /
+    // operational-instance rotation, typically a benign plugin double-load / hot-reload).
+    // Upstream doctrine requires fail-closed; we relax it so the reply is delivered instead
+    // of a "could not deliver" failure, and LOG every override so the churn can be measured
+    // and the gate later re-tightened. Bind to the run's CURRENT registry authority; only
+    // when the run context is entirely gone (run truly ended, nothing to bind) do we keep
+    // failing closed.
+    const fallbackAuthority = peekCurrentRunDelegatedAuthorityForForkOverride(operationalRunId);
+    forkAuthLog.warn("fail-open: delegated run authority not active; allowing side-effect tool", {
+      runId: operationalRunId,
+      instanceId: operationalInstanceId,
+      hasFallbackAuthority: Boolean(fallbackAuthority),
+      fallbackClaimId: fallbackAuthority?.claimId,
+      fallbackGeneration: fallbackAuthority?.lifecycleGeneration,
+      fallbackInstanceId: fallbackAuthority?.operationalRunInstance.instanceId,
+    });
+    if (!fallbackAuthority) {
+      throw new Error("agent runtime identity requires active delegated run authority");
+    }
+    activeAuthority = fallbackAuthority;
   }
   if (
     params.workerTurnClaim &&
