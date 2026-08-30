@@ -42,7 +42,12 @@ export const CONFIGURED_RUNTIME_PLUGIN_INSTALL_CANDIDATES: readonly ConfiguredRu
     {
       pluginId: "codex",
       label: "Codex",
-      npmSpec: "@openclaw/codex",
+      // cojad fork: pin codex to the cohort compatible with this core's SDK. Unbound
+      // @beta drifted to 2026.9.x which needs a newer plugin-sdk than this core ships
+      // (clean-install churn: codex doctor-contract imports 'isPathInside' the core
+      // does not export -> startup migration never settles). 2026.7.2-beta.7 is what
+      // the shipped 2608.x image runs. Repin when the core is upgraded to a newer cohort.
+      npmSpec: "@openclaw/codex@2026.7.2-beta.7",
       trustedSourceLinkedOfficialInstall: true,
     },
   ];
