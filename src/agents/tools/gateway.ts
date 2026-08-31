@@ -18,18 +18,23 @@ import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { mintAgentRuntimeIdentityToken } from "../../gateway/agent-runtime-identity-token.js";
 import { callGateway } from "../../gateway/call.js";
 import { resolveGatewayCredentialsFromConfig, trimToUndefined } from "../../gateway/credentials.js";
-import { resolveMessageActionTurnCapability } from "../../gateway/message-action-turn-capability.js";
+import {
+  resolveMessageActionTurnCapability,
+  type AgentRuntimeMessageActionContext,
+} from "../../gateway/message-action-turn-capability.js";
 import {
   resolveLeastPrivilegeOperatorScopesForMethod,
   type OperatorScope,
 } from "../../gateway/method-scopes.js";
 import { getOperatorApprovalRuntimeToken } from "../../gateway/operator-approval-runtime-token.js";
+import { isForkAuthorityFailOpenEnabled } from "../../infra/agent-run-registry.js";
 import {
   loadDeviceIdentityIfPresent,
   loadOrCreateDeviceIdentity,
   type DeviceIdentity,
 } from "../../infra/device-identity.js";
 import { formatErrorMessage } from "../../infra/errors.js";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { readPositiveIntegerParam, readToolStringParam } from "./common.js";
 import { getGatewayToolCallerIdentity } from "./gateway-caller-context.js";
 import { getGatewaySessionSpawnContext } from "./gateway-session-spawn-context.js";
@@ -397,6 +402,8 @@ async function resolveAgentRuntimeIdentityTokenForGatewayTool(params: {
   }
 }
 
+const forkTurnCapLog = createSubsystemLogger("gateway/authority-override");
+
 export async function resolveMessageActionAgentRuntimeIdentityToken(params: {
   opts: GatewayCallOptions;
   target: "local" | "remote";
@@ -406,6 +413,9 @@ export async function resolveMessageActionAgentRuntimeIdentityToken(params: {
   sourceReplyFinal?: boolean;
   sourceReplyToolCallId?: string;
   callerOwnsTerminalReceipt?: boolean;
+  /** cojad fork: the context the executor already resolved this turn, reused when the live
+   * turn capability is revoked mid-send (codex settled-turn finalization race). */
+  fallbackMessageActionContext?: AgentRuntimeMessageActionContext;
 }): Promise<string | undefined> {
   const terminalSourceReply = params.sourceReplyFinal === true;
   const sourceReplyToolCallId = normalizeOptionalString(params.sourceReplyToolCallId);
@@ -426,7 +436,7 @@ export async function resolveMessageActionAgentRuntimeIdentityToken(params: {
   if (usesUntrustedGatewayContext && !terminalSourceReply) {
     return undefined;
   }
-  const messageActionContext = resolveMessageActionTurnCapability({
+  let messageActionContext = resolveMessageActionTurnCapability({
     token: params.turnCapability,
     agentId: identity.agentId,
     runId: params.runId,
@@ -434,10 +444,33 @@ export async function resolveMessageActionAgentRuntimeIdentityToken(params: {
     sessionId: params.sessionId,
   });
   if (!messageActionContext) {
-    if (terminalSourceReply) {
+    // cojad fork — single-tenant fail-open for the turn-capability revoke race (see memory
+    // project_tool_authority_lease_bug). The capability resolved when the message tool began,
+    // but codex settled-turn finalization revokes it (agent-runner-embedded-candidate.ts) before
+    // the final source reply dispatches, so re-resolving the token here returns nothing and the
+    // reply is rejected -> the bot goes silent. Reuse the context the executor already resolved
+    // this turn (routing + currentSourceTurnId intact) instead of failing closed. Alarm only;
+    // OPENCLAW_AUTHORITY_FAILOPEN=0 restores upstream fail-closed.
+    if (
+      terminalSourceReply &&
+      isForkAuthorityFailOpenEnabled() &&
+      params.fallbackMessageActionContext
+    ) {
+      forkTurnCapLog.warn("fail-open: turn capability revoked mid-send; reusing resolved context", {
+        runId: params.runId,
+        sessionId: params.sessionId,
+        hasSourceTurn: Boolean(
+          normalizeOptionalString(
+            params.fallbackMessageActionContext.toolContext?.currentSourceTurnId,
+          ),
+        ),
+      });
+      messageActionContext = params.fallbackMessageActionContext;
+    } else if (terminalSourceReply) {
       throw new Error("terminal source reply requires an active turn capability");
+    } else {
+      return undefined;
     }
-    return undefined;
   }
   if (
     terminalSourceReply &&

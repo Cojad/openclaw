@@ -545,6 +545,9 @@ export function createMessageTool(options?: MessageToolOptions): AnyAgentTool {
                   sourceReplyFinal: context?.sourceReplyFinal,
                   sourceReplyToolCallId: context?.sourceReplyToolCallId,
                   callerOwnsTerminalReceipt,
+                  // cojad fork: reuse this turn's already-resolved capability context if the
+                  // live token is revoked before dispatch (codex finalization race).
+                  fallbackMessageActionContext: trustedTurnContext,
                 }),
             };
       const hasCurrentMessageId =
