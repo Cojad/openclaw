@@ -18,6 +18,12 @@ GUARD_IMAGE="${STAGING}"
 # root that contains .openclaw/ (e.g. /x/srv/bot/eagle/config). Channels are NOT
 # started during this check, so it never hijacks the live Telegram poller.
 SMOKE_STATE_SRC="${OPENCLAW_SMOKE_STATE_SRC:-}"
+# cojad opt-in: guard 2a is a ZERO-STATE canary (installs codex fresh from @beta on a clean
+# config; churns whenever core train != codex train — which the currently-deployed healthy
+# image ALSO does, prod only avoids it via codex already installed in the persistent volume).
+# OPENCLAW_SKIP_GUARD_2A=1 downgrades 2a to a warning but makes guard 2b (doctor --fix vs real
+# state) MANDATORY, swapping the non-representative canary for the representative check.
+SKIP_GUARD_2A="${OPENCLAW_SKIP_GUARD_2A:-}"
 
 # ---------------------------------------------------------------------------
 # Why the guards exist:
@@ -111,17 +117,30 @@ timeout 150 docker run --rm -v "${SMOKE_VOL}:/home/node" \
   >> "${SMOKE_LOG}" 2>&1 || true
 
 BOOT2_LOG="$(sed -n '/===SMOKE_BOOT_2===/,$p' "${SMOKE_LOG}")"
+guard2a_fail=""
 if printf '%s' "${BOOT2_LOG}" | grep -qiE 'migration inputs changed during startup convergence|refusing to report the gateway ready|Refreshed stale configured plugin'; then
-  echo "X [guard 2a] convergence churn on second boot -> image would crash-loop. Not shipping:"
-  printf '%s' "${BOOT2_LOG}" | grep -iE 'Refreshed stale configured plugin|migration inputs changed|refusing to report' | sort -u | head -5
-  exit 1
+  guard2a_fail="convergence churn on second boot"
+elif ! printf '%s' "${BOOT2_LOG}" | grep -qiE 'http server listening'; then
+  guard2a_fail="gateway never reported ready on second boot"
 fi
-if ! printf '%s' "${BOOT2_LOG}" | grep -qiE 'http server listening'; then
-  echo "X [guard 2a] gateway never reported ready on second boot. Not shipping:"
-  printf '%s' "${BOOT2_LOG}" | tail -15
-  exit 1
+if [ -n "${guard2a_fail}" ]; then
+  if [ "${SKIP_GUARD_2A}" = "1" ]; then
+    echo "!! [guard 2a] ${guard2a_fail} — BYPASSED via OPENCLAW_SKIP_GUARD_2A=1 (zero-state canary)."
+    printf '%s' "${BOOT2_LOG}" | grep -iE 'Refreshed stale configured plugin|migration inputs changed|refusing to report|isPathInside' | sort -u | head -5
+    # Bypassing 2a forfeits the only clean-config gate; guard 2b (real state) becomes mandatory.
+    if [ -z "${SMOKE_STATE_SRC}" ] || [ ! -d "${SMOKE_STATE_SRC}/.openclaw" ]; then
+      echo "X [guard 2a bypass] refuses to ship without guard 2b: set OPENCLAW_SMOKE_STATE_SRC=<config root>."
+      exit 1
+    fi
+  else
+    echo "X [guard 2a] ${guard2a_fail} -> image would crash-loop. Not shipping:"
+    printf '%s' "${BOOT2_LOG}" | grep -iE 'Refreshed stale configured plugin|migration inputs changed|refusing to report' | sort -u | head -5
+    printf '%s' "${BOOT2_LOG}" | tail -5
+    exit 1
+  fi
+else
+  echo "    [2a] clean-config second boot reached ready, no churn. OK"
 fi
-echo "    [2a] clean-config second boot reached ready, no churn. OK"
 docker volume rm "${SMOKE_VOL}" >/dev/null 2>&1 || true
 SMOKE_VOL=""
 
