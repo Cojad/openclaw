@@ -21,6 +21,7 @@ import { getRuntimeConfig } from "../../config/config.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { resolveMessageActionTurnCapability } from "../../gateway/message-action-turn-capability.js";
 import { createAbortError } from "../../infra/abort-signal.js";
+import { isForkAuthorityFailOpenEnabled } from "../../infra/agent-run-registry.js";
 import { sha256Base64UrlPrefix } from "../../infra/crypto-digest.js";
 import { resolveMessageChannelSelection } from "../../infra/outbound/channel-selection.js";
 import {
@@ -34,6 +35,7 @@ import type {
 import { getToolResult, runMessageAction } from "../../infra/outbound/message-action-runner.js";
 import { resolveActionDeliveryTargetAlias } from "../../infra/outbound/message-action-spec.js";
 import { shouldApplyCrossContextMarker } from "../../infra/outbound/outbound-policy.js";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { stringifyRouteThreadId } from "../../plugin-sdk/channel-route.js";
 import { getPreparedMessageToolCatalog } from "../../plugins/prepared-message-tool-catalog.js";
 import { normalizeAccountId } from "../../routing/session-key.js";
@@ -233,6 +235,8 @@ type MessageToolOptions = {
   conversationReadOrigin?: ConversationReadInvocationOrigin;
 };
 
+const forkMteLog = createSubsystemLogger("gateway/authority-override");
+
 export function createMessageTool(options?: MessageToolOptions): AnyAgentTool {
   const loadConfigForTool = options?.getRuntimeConfig ?? getRuntimeConfig;
   const getScopedSecretTargetsForTool =
@@ -338,7 +342,15 @@ export function createMessageTool(options?: MessageToolOptions): AnyAgentTool {
             })
           : undefined;
       if (normalizeOptionalString(options?.messageActionTurnCapability) && !trustedTurnContext) {
-        throw new Error("message action turn capability is no longer active");
+        // cojad fork — single-tenant fail-open: executor-start turn-capability check. Alarm and
+        // proceed (delivers as a non-source-reply send) instead of dropping the reply.
+        if (!isForkAuthorityFailOpenEnabled()) {
+          throw new Error("message action turn capability is no longer active");
+        }
+        forkMteLog.warn("fail-open: turn capability inactive at executor start; proceeding", {
+          runId: options?.runId,
+          sessionId: options?.sessionId,
+        });
       }
       if (options?.sourceReplyOnly) {
         enforceSourceReplyOnlyMessageAction({

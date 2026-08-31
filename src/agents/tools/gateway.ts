@@ -425,7 +425,12 @@ export async function resolveMessageActionAgentRuntimeIdentityToken(params: {
   const identity = getGatewayToolCallerIdentity();
   if (!identity) {
     if (terminalSourceReply) {
-      throw new Error("terminal source reply requires trusted agent runtime identity");
+      // cojad fork — single-tenant fail-open: proceed as a non-source-reply send instead of
+      // dropping the reply when the trusted caller identity is absent.
+      if (!isForkAuthorityFailOpenEnabled()) {
+        throw new Error("terminal source reply requires trusted agent runtime identity");
+      }
+      forkTurnCapLog.warn("fail-open: terminal reply missing trusted identity; non-source-reply");
     }
     return undefined;
   }
@@ -467,7 +472,15 @@ export async function resolveMessageActionAgentRuntimeIdentityToken(params: {
       });
       messageActionContext = params.fallbackMessageActionContext;
     } else if (terminalSourceReply) {
-      throw new Error("terminal source reply requires an active turn capability");
+      // cojad fork — single-tenant fail-open: no live capability and no resolved fallback to
+      // reuse; alarm and proceed as a non-source-reply send instead of dropping the reply.
+      if (!isForkAuthorityFailOpenEnabled()) {
+        throw new Error("terminal source reply requires an active turn capability");
+      }
+      forkTurnCapLog.warn(
+        "fail-open: turn capability revoked, no fallback context; non-source-reply",
+      );
+      return undefined;
     } else {
       return undefined;
     }
@@ -476,7 +489,15 @@ export async function resolveMessageActionAgentRuntimeIdentityToken(params: {
     terminalSourceReply &&
     !normalizeOptionalString(messageActionContext.toolContext?.currentSourceTurnId)
   ) {
-    throw new Error("terminal source reply requires source-turn correlation");
+    // cojad fork — single-tenant fail-open: no source-turn to correlate (binding lapsed);
+    // proceed as a non-source-reply send instead of dropping the reply.
+    if (!isForkAuthorityFailOpenEnabled()) {
+      throw new Error("terminal source reply requires source-turn correlation");
+    }
+    forkTurnCapLog.warn(
+      "fail-open: terminal reply missing source-turn correlation; non-source-reply",
+    );
+    return undefined;
   }
   if (usesUntrustedGatewayContext) {
     if (params.callerOwnsTerminalReceipt !== true) {
@@ -488,7 +509,14 @@ export async function resolveMessageActionAgentRuntimeIdentityToken(params: {
   }
   if (!identity.operationalRunInstance) {
     if (terminalSourceReply) {
-      throw new Error("terminal source reply requires a trusted operational run instance");
+      // cojad fork — single-tenant fail-open: proceed as a non-source-reply send instead of
+      // dropping the reply when the operational run instance binding is gone.
+      if (!isForkAuthorityFailOpenEnabled()) {
+        throw new Error("terminal source reply requires a trusted operational run instance");
+      }
+      forkTurnCapLog.warn(
+        "fail-open: terminal reply missing operational run instance; non-source-reply",
+      );
     }
     return undefined;
   }

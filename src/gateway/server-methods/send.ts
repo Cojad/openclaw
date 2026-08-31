@@ -30,6 +30,7 @@ import {
   selectApplicableRuntimeConfig,
 } from "../../config/runtime-snapshot.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { isForkAuthorityFailOpenEnabled } from "../../infra/agent-run-registry.js";
 import { resolveOutboundChannelPlugin } from "../../infra/outbound/channel-resolution.js";
 import { resolveMessageChannelSelection } from "../../infra/outbound/channel-selection.js";
 import { validateExplicitMessageAccountSelection } from "../../infra/outbound/message-account-selection.js";
@@ -54,6 +55,7 @@ import {
 } from "../../infra/outbound/source-reply-mirror.js";
 import { maybeResolveIdLikeTarget } from "../../infra/outbound/target-resolver.js";
 import { resolveOutboundTarget } from "../../infra/outbound/targets.js";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { getAgentScopedMediaLocalRoots } from "../../media/local-roots.js";
 import { resolveAgentScopedOutboundMediaAccess } from "../../media/read-capability.js";
 import { KeyedAsyncQueue } from "../../plugin-sdk/keyed-async-queue.js";
@@ -199,6 +201,8 @@ async function acquireMessageOperationRouteBindingLock(params: {
   };
 }
 
+const forkAuthLog = createSubsystemLogger("gateway/authority-override");
+
 function resolveTrustedMessageActionToolContext(params: {
   client: Parameters<GatewayRequestHandlers["message.action"]>[0]["client"];
   request: {
@@ -235,13 +239,22 @@ function resolveTrustedMessageActionToolContext(params: {
     };
   }
   if (Date.now() >= messageActionContext.expiresAtMs) {
-    return {
-      ok: false,
-      error: errorShape(
-        ErrorCodes.INVALID_REQUEST,
-        "message.action agent runtime context has expired",
-      ),
-    };
+    // cojad fork — single-tenant fail-open (see memory project_tool_authority_lease_bug). This
+    // server-side context-TTL gate is one of a chain of identity checks that reject a source
+    // reply when the run's binding lapses mid-send; single-tenant has no cross-tenant misuse to
+    // guard, so alarm and deliver instead of dropping the reply.
+    if (!isForkAuthorityFailOpenEnabled()) {
+      return {
+        ok: false,
+        error: errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          "message.action agent runtime context has expired",
+        ),
+      };
+    }
+    forkAuthLog.warn("fail-open: message-action context expired; delivering anyway", {
+      sessionKey: identity.sessionKey,
+    });
   }
   const requestSessionKey = normalizeSessionKeyPreservingOpaquePeerIds(params.request.sessionKey);
   const identitySessionKey = normalizeSessionKeyPreservingOpaquePeerIds(identity.sessionKey);
@@ -263,13 +276,26 @@ function resolveTrustedMessageActionToolContext(params: {
       (!sourceReplySessionAgentId ||
         normalizeAgentId(sourceReplySessionAgentId) !== identityAgentId))
   ) {
-    return {
-      ok: false,
-      error: errorShape(
-        ErrorCodes.INVALID_REQUEST,
-        "message.action agent runtime identity does not match the requested session",
-      ),
-    };
+    // cojad fork — single-tenant fail-open (see memory project_tool_authority_lease_bug). This is
+    // the server-side identity/session-consistency gate (gate C). It rejects the source reply when
+    // the run's identity binding was torn down/rotated mid-send (codex settled-turn finalization,
+    // hot-reload, mirrored late delivery). Single-tenant has one owner and one agent, so a
+    // "mismatch" is a lapsed self-binding, never cross-tenant misuse: alarm and deliver.
+    if (!isForkAuthorityFailOpenEnabled()) {
+      return {
+        ok: false,
+        error: errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          "message.action agent runtime identity does not match the requested session",
+        ),
+      };
+    }
+    forkAuthLog.warn("fail-open: message-action identity/session mismatch; delivering anyway", {
+      requestSessionKey,
+      identitySessionKey,
+      requestSessionId,
+      contextSessionId: messageActionContext.sessionId,
+    });
   }
   return {
     ok: true,
