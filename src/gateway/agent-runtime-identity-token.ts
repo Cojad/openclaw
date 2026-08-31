@@ -12,7 +12,9 @@ import type { ChannelId } from "../channels/plugins/types.public.js";
 import type { InternalChannelThreadingToolContext } from "../channels/threading-tool-context-internal.js";
 import {
   getActiveAgentRunDelegatedAuthority,
+  isForkAuthorityFailOpenEnabled,
   peekCurrentRunDelegatedAuthorityForForkOverride,
+  synthesizeForkOverrideDelegatedAuthority,
   validateAgentRunDelegatedAuthority,
   type AgentRunDelegatedAuthority,
 } from "../infra/agent-run-registry.js";
@@ -507,28 +509,34 @@ function prepareAgentRuntimeIdentityTokenPayload(params: AgentRuntimeIdentityTok
     runId: operationalRunId,
   });
   if (!activeAuthority) {
-    // cojad fork — DELIBERATE fail-OPEN (2026-08-30, 柯姊 decision; single-tenant personal
-    // deployment). Upstream fails side-effect tools closed here when the run's original
-    // authority claim no longer matches the live registry (mid-run lifecycle-generation /
-    // operational-instance rotation, typically a benign plugin double-load / hot-reload).
-    // Upstream doctrine requires fail-closed; we relax it so the reply is delivered instead
-    // of a "could not deliver" failure, and LOG every override so the churn can be measured
-    // and the gate later re-tightened. Bind to the run's CURRENT registry authority; only
-    // when the run context is entirely gone (run truly ended, nothing to bind) do we keep
-    // failing closed.
+    // cojad fork — DELIBERATE fail-OPEN (single-tenant personal deployment; see memory
+    // project_tool_authority_lease_bug). Upstream fails side-effect tools closed here when the
+    // run's original authority claim no longer matches the live registry. Two real causes hit
+    // this single bot: (1) SIGUSR1 hot-reload / config-change lifecycle-generation rotation, and
+    // (2) codex terminal-dynamic-tool finalization releasing the run's claim ~seconds before the
+    // final message(action=send) is delivered. In case (2) releaseAgentRunContext also deletes
+    // context.delegatedAuthority, so the peek fallback is empty too — we then SYNTHESIZE a
+    // permissive authority bound to the run's current generation so the reply is delivered
+    // instead of a "could not deliver" failure. Every override is logged so the churn stays
+    // measurable; OPENCLAW_AUTHORITY_FAILOPEN=0 restores upstream fail-closed for A/B proof.
     const fallbackAuthority = peekCurrentRunDelegatedAuthorityForForkOverride(operationalRunId);
+    const failOpen = isForkAuthorityFailOpenEnabled();
     forkAuthLog.warn("fail-open: delegated run authority not active; allowing side-effect tool", {
       runId: operationalRunId,
       instanceId: operationalInstanceId,
+      failOpen,
       hasFallbackAuthority: Boolean(fallbackAuthority),
+      resolution: fallbackAuthority ? "peek-current" : "synthesized",
       fallbackClaimId: fallbackAuthority?.claimId,
       fallbackGeneration: fallbackAuthority?.lifecycleGeneration,
       fallbackInstanceId: fallbackAuthority?.operationalRunInstance.instanceId,
     });
-    if (!fallbackAuthority) {
+    if (!failOpen) {
       throw new Error("agent runtime identity requires active delegated run authority");
     }
-    activeAuthority = fallbackAuthority;
+    activeAuthority =
+      fallbackAuthority ??
+      synthesizeForkOverrideDelegatedAuthority(operationalInstanceId, operationalRunId);
   }
   if (
     params.workerTurnClaim &&
@@ -687,6 +695,19 @@ function validateAgentRuntimeDelegatedAuthority(
   placements?: WorkerTurnClaimValidator,
 ): boolean {
   if (!validateAgentRunDelegatedAuthority(authority)) {
+    // cojad fork — single-tenant fail-open (see memory project_tool_authority_lease_bug). Gate ①
+    // may have synthesized this authority after a mid-run claim release/rotation; this use-time
+    // re-check would otherwise reject it and re-block message/bash (the downstream re-validation
+    // that made a gate-①-only fix insufficient). Alarm only, never block, for local runs.
+    if (isForkAuthorityFailOpenEnabled() && authority.kind === "local") {
+      forkAuthLog.warn("fail-open: delegated authority failed use-time revalidation; allowing", {
+        runId: authority.operationalRunInstance.runId,
+        instanceId: authority.operationalRunInstance.instanceId,
+        claimId: authority.claimId,
+        generation: authority.lifecycleGeneration,
+      });
+      return true;
+    }
     return false;
   }
   return authority.kind === "local"

@@ -1,5 +1,9 @@
 import { ErrorCodes, errorShape } from "../../../packages/gateway-protocol/src/index.js";
+import { isForkAuthorityFailOpenEnabled } from "../../infra/agent-run-registry.js";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
 import type { GatewayClient, GatewayRequestContext, RespondFn } from "./types.js";
+
+const forkAuthLog = createSubsystemLogger("gateway/authority-override");
 
 export function hasActiveAgentRuntimeAuthority(
   client: GatewayClient | null,
@@ -9,7 +13,17 @@ export function hasActiveAgentRuntimeAuthority(
   const validate = context.validateAgentRuntimeApprovalAuthority;
   // Production dispatch always supplies the validator. Lightweight direct-handler
   // contexts have no live authority owner and therefore no identity to invalidate.
-  return !identity || !validate || validate(identity);
+  if (!identity || !validate || validate(identity)) {
+    return true;
+  }
+  // cojad fork — single-tenant fail-open (see memory project_tool_authority_lease_bug). The wired
+  // validator normally already fail-opens (see agent-runtime-identity-token.ts), but a differently
+  // injected validator must never block a gateway action for this single bot either. Alarm only.
+  if (isForkAuthorityFailOpenEnabled()) {
+    forkAuthLog.warn("fail-open: server-side runtime authority inactive; allowing gateway action");
+    return true;
+  }
+  return false;
 }
 
 export function assertActiveAgentRuntimeAuthority(

@@ -1,8 +1,20 @@
 // Owns process-local agent run context, ownership, and projection state.
 import { randomUUID } from "node:crypto";
 import type { VerboseLevel } from "../auto-reply/thinking.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import { clearAgentRunUsage, resetAgentRunUsageForTest } from "./agent-run-usage.js";
+
+// cojad fork — single-tenant claim audit + authority fail-open (see memory
+// project_tool_authority_lease_bug). Logs every claimId add/release/rotation so the churn
+// that invalidates in-flight tool authority (message/bash) is measurable, and exposes an
+// A/B kill-switch so the fail-open override's effect can be proven on/off.
+const claimAuditLog = createSubsystemLogger("infra/run-claim-audit");
+
+/** cojad fork kill-switch: OPENCLAW_AUTHORITY_FAILOPEN=0 restores upstream fail-closed (for A/B proof). */
+export function isForkAuthorityFailOpenEnabled(): boolean {
+  return process.env.OPENCLAW_AUTHORITY_FAILOPEN !== "0";
+}
 
 /** Per-run metadata used to stamp events and gate Control UI visibility. */
 type AgentRunContext = {
@@ -90,6 +102,15 @@ export function rotateAgentRunRegistryLifecycleGeneration(): string {
   for (const context of state.contexts.values()) {
     const authority = context.delegatedAuthority;
     if (authority) {
+      // cojad fork audit — a lifecycle-generation rotation (SIGUSR1 hot-reload / config change)
+      // tears down every in-flight claim; this is one of the two root causes of the mid-run
+      // "could not deliver" bug. Log each invalidated authority so rotation churn is visible.
+      claimAuditLog.warn("claim invalidated by lifecycle-generation rotation", {
+        runId: authority.operationalRunInstance.runId,
+        claimId: authority.claimId,
+        generation: authority.lifecycleGeneration,
+        cause: "generation-rotation",
+      });
       delete context.delegatedAuthority;
       notifyDelegatedAuthorityClosed(state, authority);
     }
@@ -253,6 +274,15 @@ export function claimAgentRunContext(
     claimId = randomUUID();
     if (currentOwners) {
       currentOwners.claimIds.add(claimId);
+      claimAuditLog.debug("claimId add", {
+        runId,
+        claimId,
+        generation: currentOwners.lifecycleGeneration,
+        ownerState: "existing",
+        exclusive: options.exclusive === true,
+        ownsContext: options.ownsContext === true,
+        protectFromSweep: options.protectFromSweep === true,
+      });
       if (options.protectFromSweep) {
         currentOwners.sweepProtectedClaimIds.add(claimId);
       }
@@ -275,6 +305,15 @@ export function claimAgentRunContext(
         ...(options.onClearRequested
           ? { clearListeners: new Map([[claimId, options.onClearRequested]]) }
           : {}),
+      });
+      claimAuditLog.debug("claimId add", {
+        runId,
+        claimId,
+        generation: lifecycleGeneration,
+        ownerState: "new-owner",
+        exclusive: options.exclusive === true,
+        ownsContext: options.ownsContext === true,
+        protectFromSweep: options.protectFromSweep === true,
       });
     }
   } else if (existingOwners?.lifecycleGeneration !== lifecycleGeneration) {
@@ -532,6 +571,26 @@ export function peekCurrentRunDelegatedAuthorityForForkOverride(
   return getAgentRunRegistryState().contexts.get(runId)?.delegatedAuthority;
 }
 
+/**
+ * cojad fork — single-tenant fail-open. Mints a permissive delegated authority bound to the
+ * run's CURRENT global lifecycle generation. Used when the run's original claim was fully
+ * released mid-run (codex terminal-dynamic-tool finalization deletes context.delegatedAuthority,
+ * so peek is also empty) or rotated (SIGUSR1 hot-reload) while a side-effect tool (message/bash)
+ * was still being invoked. See memory project_tool_authority_lease_bug. This is NEVER an upstream
+ * authorization primitive — it only exists so a single personal bot delivers its reply instead of
+ * failing with "could not deliver"; the synthetic claimId is not registered in owners.claimIds.
+ */
+export function synthesizeForkOverrideDelegatedAuthority(
+  instanceId: string,
+  runId: string,
+): AgentRunDelegatedAuthority {
+  return {
+    operationalRunInstance: { instanceId, runId },
+    lifecycleGeneration: getAgentRunRegistryState().lifecycleGeneration,
+    claimId: `fork-override-${randomUUID()}`,
+  };
+}
+
 export function validateAgentRunDelegatedAuthority(authority: AgentRunDelegatedAuthority): boolean {
   const active = getActiveAgentRunDelegatedAuthority(authority.operationalRunInstance);
   return (
@@ -669,6 +728,16 @@ export function releaseAgentRunContext(runId: string, claimId: string | undefine
   if (!owners?.claimIds.delete(claimId)) {
     return;
   }
+  // cojad fork audit — `releasesDelegatedAuthority:true` is the smoking gun for the mid-run bug:
+  // a run's live tool authority being torn down (codex settled-turn finalization) while its final
+  // message(action=send) is still in flight. See memory project_tool_authority_lease_bug.
+  claimAuditLog.debug("claimId release", {
+    runId,
+    claimId,
+    generation: owners.lifecycleGeneration,
+    remaining: owners.claimIds.size,
+    releasesDelegatedAuthority: state.contexts.get(runId)?.delegatedAuthority?.claimId === claimId,
+  });
   const context = state.contexts.get(runId);
   const authority = context?.delegatedAuthority;
   if (context && authority?.claimId === claimId) {
