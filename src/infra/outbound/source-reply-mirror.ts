@@ -21,8 +21,10 @@ import {
 } from "../../config/sessions/restart-recovery-receipt.js";
 import { getOwnedSessionTranscriptWriterFence } from "../../config/sessions/transcript-write-context.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { normalizeAccountId, resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
 import { readTrimmedStringAlias } from "../../utils/string-readers.js";
+import { isForkAuthorityFailOpenEnabled } from "../agent-run-registry.js";
 import { createOutboundPayloadPlan, projectOutboundPayloadPlanForMirror } from "./payloads.js";
 
 type SourceReplyTranscriptMirrorParams = {
@@ -50,6 +52,38 @@ type TerminalSourceReplyDeliveryStart =
       result: { status: string; delivered: false; message: string };
     }
   | undefined;
+
+// cojad fork — single-tenant fail-open for the restart-recovery dedupe tombstone (see memory
+// project_tool_authority_lease_bug). A long run that spans a gateway restart can leave a terminal
+// tombstone for its source turn, so the run's REAL final reply is then rejected as
+// "already_delivered" and the bot goes silent — the same swallowed-reply class as the identity
+// gates, but a state machine rather than an authority check, so those fail-opens never see it.
+// Policy: never block a message-tool send; alarm instead. To keep the anti-duplicate guarantee
+// that the tombstone existed for, we replace turn-level dedupe with CONTENT dedupe: the exact
+// same payload for the same source turn within the window stays suppressed, anything else sends.
+const FORK_RECENT_SOURCE_REPLY_TTL_MS = 60_000;
+const forkRecentSourceReplies = new Map<string, number>();
+const forkSourceReplyLog = createSubsystemLogger("gateway/authority-override");
+
+function forkSourceReplyContentFingerprint(params: SourceReplyTranscriptMirrorParams): string {
+  const body = readFirstString(params.actionParams, ["message", "text", "body", "caption"]) ?? "";
+  return `${params.sessionId ?? ""}|${resolveCurrentSourceTurnId(params.toolContext) ?? ""}|${body}`;
+}
+
+/** True when this exact reply body already went out for this source turn moments ago. */
+function forkIsDuplicateSourceReply(fingerprint: string, nowMs: number): boolean {
+  for (const [key, ts] of forkRecentSourceReplies) {
+    if (nowMs - ts > FORK_RECENT_SOURCE_REPLY_TTL_MS) {
+      forkRecentSourceReplies.delete(key);
+    }
+  }
+  const seenAt = forkRecentSourceReplies.get(fingerprint);
+  if (seenAt !== undefined && nowMs - seenAt <= FORK_RECENT_SOURCE_REPLY_TTL_MS) {
+    return true;
+  }
+  forkRecentSourceReplies.set(fingerprint, nowMs);
+  return false;
+}
 
 function buildTerminalSourceReplyNoSendResult(outcome: "already_delivered" | "delivery_ambiguous") {
   return {
@@ -251,11 +285,26 @@ export async function beginTerminalSourceReplyDelivery(
   if (result === "not-applicable") {
     return undefined;
   }
-  if (result === "already-delivered") {
-    return buildTerminalSourceReplyNoSendResult("already_delivered");
-  }
-  if (result === "delivery-ambiguous" || result === "stale") {
-    return buildTerminalSourceReplyNoSendResult("delivery_ambiguous");
+  if (result === "already-delivered" || result === "delivery-ambiguous" || result === "stale") {
+    const outcome = result === "already-delivered" ? "already_delivered" : "delivery_ambiguous";
+    if (!isForkAuthorityFailOpenEnabled()) {
+      return buildTerminalSourceReplyNoSendResult(outcome);
+    }
+    // Suppress only a byte-identical resend of this turn's reply; anything else must reach the
+    // user rather than being swallowed by a stale tombstone.
+    const fingerprint = forkSourceReplyContentFingerprint(params);
+    if (forkIsDuplicateSourceReply(fingerprint, Date.now())) {
+      forkSourceReplyLog.warn("fail-open: duplicate source reply body suppressed", {
+        sessionId: params.sessionId,
+        outcome,
+      });
+      return buildTerminalSourceReplyNoSendResult(outcome);
+    }
+    forkSourceReplyLog.warn("fail-open: stale restart-recovery dedupe state; delivering anyway", {
+      sessionId: params.sessionId,
+      outcome,
+    });
+    return receipt;
   }
   return receipt;
 }
